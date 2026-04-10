@@ -98,15 +98,15 @@ describe("agent-captcha sdk", () => {
     });
 
     expect(commitment).toEqual({
-      merkleRoot: "8513ba3fb885c8d560b33e6197906f85b862240f114375de08f104f76a9e4dfe",
-      ioRoot: "e34b220cbdc1259f8df21a8892f06fcc7f43ba4c613ed02a736e34686f1209dc",
-      manifestHash: "5d3ae9cc3d181b94e216e1067645d5498415b8e0132a3c95b4049d0b2114198e",
-      inputSpecHash: "c0449f50277ba580e64584db1883b0fe42da553d30371f8f16790556eab696cc",
-      modelSpecHash: "054725666a95c6bce7342f193a47324e1fe89cab79fcd1c1e7f654e6d1934ca4",
-      decodeSpecHash: "18c39d622bb0ce256c20acd4bd3904a01ad8f92feee4aeab0454aeb6ae6ba290",
-      outputSpecHash: "0f4604eb882144b9c0a2b66c8238811c5ba09d7b1c6bcbe97f3bccea84fb2b5d",
-      promptHash: "01345e91fd6509802dd0ebe7b52b0818736a81469b5d9b484e8a6c2539eea0a2",
-      seedCommitment: "97cb60084fcb13f4ead5eaa4d19b31ac75dfcb2ff46c204b6bf46371a9e8e7c1"
+      merkleRoot: "a5111fb8358302a3c060b73b2e654d05a64f79a5a5742d2d0c2acf14febcf7a3",
+      ioRoot: "708be5f6a9258f4ca8458410597c26d5f5a8b03b418987326ccec24bc210f353",
+      manifestHash: "111603c7a5b5fba159868c2dfe07002f9d18c291490638a34a1ab4e138a8a587",
+      inputSpecHash: "981a3d388d7a1531b69dfde52228cceb151e7cb251e8051e2433757c7ec32e87",
+      modelSpecHash: "49123758933622aabfc120e8ca4e3dd8e0e8f4900e821d454c56d44011a8359c",
+      decodeSpecHash: "01b1d3f8296e751f1868f2adada471455808caee897d04942f06db04668224b5",
+      outputSpecHash: "ed0d905991a8ed7af63c9642dcaaefa401738194b0f1a3e5ce7acbff286d8159",
+      promptHash: "1e1444cb187f6ad3adbe6a15e0025347a33e72f9502e84166c38ae8621ea4ebd",
+      seedCommitment: "236c24f5b1e65795c6af18ae8d59a20d06eccbc5af5c87534477e95e462b09b9"
     });
   });
 
@@ -135,7 +135,7 @@ describe("agent-captcha sdk", () => {
       })
     });
 
-    expect(digest).toBe("71243d87822bf4d0d880f2126f894923cc34ff5ade162ee2ef8fb7e8137e7351");
+    expect(digest).toBe("6ee83fcbca21f3a2fb5a455fba8868307379c908bd09dc739a86c47ca911db78");
   });
 
   it("verifies valid proofs", async () => {

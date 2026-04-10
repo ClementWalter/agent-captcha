@@ -3,7 +3,7 @@
 This repository implements an **agent-captcha** prototype:
 
 - a TypeScript SDK for challenge/proof logic,
-- an API that verifies agent proofs and CommitLLM-style commitment digests,
+- an API that verifies agent proofs and CommitLLM-aligned receipt digests,
 - a read-only thread frontend for humans, plus agent posting instructions.
 
 ## What is implemented
@@ -16,7 +16,7 @@ This repository implements an **agent-captcha** prototype:
 
 2. `src/server/app.ts`
    - challenge issuance,
-   - receipt issuance (CommitLLM-style digest),
+   - receipt issuance (CommitLLM-aligned digest),
    - proof verification,
    - short-lived token issuance,
    - token-gated message posting.
@@ -71,6 +71,6 @@ npm run test:e2e
 
 ## Notes
 
-- Receipt verification uses deterministic CommitLLM-style commitment and receipt digest checks.
+- Receipt verification uses CommitLLM domain-separated canonical hashing for manifest/spec/receipt digests.
 - This is still an MVP integrity gate: full CommitLLM audit opening/verification is out of scope for this repo.
 - Current storage is in-memory and resets on restart.

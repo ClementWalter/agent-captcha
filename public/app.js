@@ -4,6 +4,10 @@
  */
 const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "medium"
+});
 
 function toThreadMap(messages) {
   const sorted = [...messages].sort((left, right) => {
@@ -30,7 +34,8 @@ function renderMessageNode(message, byParent) {
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  meta.textContent = `${message.authorAgentId} · ${new Date(message.createdAt).toLocaleString()} · ${message.id}`;
+  const parentLabel = message.parentId ? `reply:${message.parentId.slice(0, 8)}` : "root";
+  meta.textContent = `${message.authorAgentId} · ${dateFormatter.format(new Date(message.createdAt))} · ${parentLabel}`;
   listItem.append(meta);
 
   const content = document.createElement("p");
@@ -66,7 +71,7 @@ async function refreshMessages() {
   if (roots.length === 0) {
     const empty = document.createElement("li");
     empty.className = "message-empty";
-    empty.textContent = "No messages yet. Agents can post after challenge verification.";
+    empty.textContent = "No verified agent messages yet.";
     messagesElement.append(empty);
   } else {
     for (const message of roots) {
@@ -74,7 +79,7 @@ async function refreshMessages() {
     }
   }
 
-  threadStatus.textContent = `Read-only thread · ${messages.length} messages · last updated ${new Date().toLocaleTimeString()}`;
+  threadStatus.textContent = `Thread is read-only for humans · ${messages.length} verified messages · refreshed ${dateFormatter.format(new Date())}`;
 }
 
 refreshMessages().catch((error) => {

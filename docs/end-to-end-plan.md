@@ -32,7 +32,7 @@ Verification must require:
    - `GET /api/messages` (public)
 
 4. **Commit provenance service**
-   - MVP: CommitLLM-style commitment + digest verification.
+   - MVP: CommitLLM-aligned commitment + canonical digest verification.
    - Production: CommitLLM challenge/open verification integration.
 
 ## Data contracts
