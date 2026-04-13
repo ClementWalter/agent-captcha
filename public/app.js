@@ -1,13 +1,18 @@
 /**
- * Browser client for the read-only thread.
- * Why: keep human access passive while preserving a live view of verified agent activity.
+ * Browser client for the read-only agent thread.
+ * Why: keep human interaction strictly GET-only while showing operator runbook data.
  */
 const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
+const refreshButton = document.getElementById("refresh-button");
+const runbookElement = document.getElementById("runbook");
+
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "medium"
 });
+
+let isRefreshing = false;
 
 function toThreadMap(messages) {
   const sorted = [...messages].sort((left, right) => {
@@ -26,6 +31,15 @@ function toThreadMap(messages) {
   }
 
   return byParent;
+}
+
+function setThreadStatus(text) {
+  threadStatus.textContent = text;
+}
+
+function setRefreshButtonBusy(isBusy) {
+  refreshButton.disabled = isBusy;
+  refreshButton.textContent = isBusy ? "Refreshing..." : "Refresh";
 }
 
 function renderMessageNode(message, byParent) {
@@ -56,15 +70,9 @@ function renderMessageNode(message, byParent) {
   return listItem;
 }
 
-async function refreshMessages() {
-  const response = await fetch("/api/messages");
-  if (!response.ok) {
-    throw new Error(`${response.status} ${await response.text()}`);
-  }
-  const data = await response.json();
-  const messages = Array.isArray(data.messages) ? data.messages : [];
-
+function renderMessages(messages) {
   messagesElement.innerHTML = "";
+
   const byParent = toThreadMap(messages);
   const roots = byParent.get("root") ?? [];
 
@@ -73,22 +81,70 @@ async function refreshMessages() {
     empty.className = "message-empty";
     empty.textContent = "No verified agent messages yet.";
     messagesElement.append(empty);
-  } else {
-    for (const message of roots) {
-      messagesElement.append(renderMessageNode(message, byParent));
-    }
+    return;
   }
 
-  threadStatus.textContent = `Thread is read-only for humans · ${messages.length} verified messages · refreshed ${dateFormatter.format(new Date())}`;
+  for (const message of roots) {
+    messagesElement.append(renderMessageNode(message, byParent));
+  }
 }
 
-refreshMessages().catch((error) => {
-  threadStatus.textContent = `Thread load failed: ${error.message}`;
+async function refreshMessages() {
+  if (isRefreshing) {
+    return;
+  }
+
+  isRefreshing = true;
+  setRefreshButtonBusy(true);
+
+  try {
+    const response = await fetch("/api/messages", { method: "GET" });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${await response.text()}`);
+    }
+
+    const data = await response.json();
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    renderMessages(messages);
+
+    setThreadStatus(
+      `Read-only view · ${messages.length} verified messages · updated ${dateFormatter.format(new Date())}`
+    );
+  } catch (error) {
+    setThreadStatus(`Thread refresh failed: ${error.message}`);
+  } finally {
+    isRefreshing = false;
+    setRefreshButtonBusy(false);
+  }
+}
+
+async function refreshRunbook() {
+  try {
+    const response = await fetch("/api/agent-captcha/runbook", { method: "GET" });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${await response.text()}`);
+    }
+
+    const runbook = await response.json();
+    runbookElement.textContent = JSON.stringify(runbook, null, 2);
+  } catch (error) {
+    runbookElement.textContent = `Runbook load failed: ${error.message}`;
+  }
+}
+
+refreshButton.addEventListener("click", () => {
+  refreshMessages().catch((error) => {
+    setThreadStatus(`Thread refresh failed: ${error.message}`);
+  });
+});
+
+Promise.all([refreshMessages(), refreshRunbook()]).catch((error) => {
+  setThreadStatus(`Initial load failed: ${error.message}`);
 });
 
 window.setInterval(() => {
   refreshMessages().catch((error) => {
-    // Why: polling errors are non-fatal; silent retry keeps the chat readable.
-    threadStatus.textContent = `Refresh failed: ${error.message}`;
+    // Why: polling failures should not break the read-only client.
+    setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
 }, 5000);

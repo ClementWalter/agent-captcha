@@ -1,7 +1,6 @@
 /**
  * Demo API for agent-gated posting.
- * Why: Centralize all protocol checks on the server to ensure chat writes are only
- * accepted after a successful agent-captcha verification round.
+ * Why: centralize protocol checks so only a verified agent can mint a write token.
  */
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import path from "path";
@@ -13,15 +12,10 @@ import {
   type AgentChallenge,
   type AgentCaptchaPolicy,
   type AgentProof,
-  type CommitLLMReceipt,
   type CommitReceiptVerifier,
-  computeChallengeAnswer,
-  computeCommitHash,
-  computeCommitLLMCommitment,
-  computeCommitLLMDigest,
-  computeOutputHash,
   verifyAgentProof
 } from "../sdk";
+import { CommitLLMBinaryReceiptVerifier } from "./commitllmVerifier";
 
 const logger = pino({ name: "agent-captcha-api" });
 
@@ -55,6 +49,7 @@ export interface AppConfig {
   accessTokenSecret: string;
   policy: AgentCaptchaPolicy;
   registeredAgents: RegisteredAgent[];
+  commitReceiptVerifier?: CommitReceiptVerifier;
 }
 
 interface AppState {
@@ -62,16 +57,10 @@ interface AppState {
   messages: ChatMessage[];
 }
 
+const hex64Regex = /^[a-f0-9]{64}$/;
+
 const challengeRequestSchema = z.object({
   agentId: z.string().min(3).max(120)
-});
-
-const receiptRequestSchema = z.object({
-  challengeId: z.string().uuid(),
-  model: z.string().min(1),
-  auditMode: z.enum(["routine", "deep"]),
-  answer: z.string().regex(/^[a-f0-9]{64}$/),
-  modelOutput: z.string().min(5).max(20_000)
 });
 
 const verifyRequestSchema = z.object({
@@ -80,30 +69,25 @@ const verifyRequestSchema = z.object({
     payload: z.object({
       challengeId: z.string().uuid(),
       agentId: z.string(),
-      agentPublicKey: z.string().regex(/^[a-f0-9]{64}$/),
-      answer: z.string().regex(/^[a-f0-9]{64}$/),
-      modelOutput: z.string(),
-      modelOutputHash: z.string().regex(/^[a-f0-9]{64}$/),
+      agentPublicKey: z.string().regex(hex64Regex),
+      answer: z.string().regex(hex64Regex),
+      modelOutput: z.string().min(1).max(200_000),
+      modelOutputHash: z.string().regex(hex64Regex),
       commitReceipt: z.object({
-        receiptId: z.string().uuid(),
         challengeId: z.string().uuid(),
-        model: z.string(),
+        model: z.string().min(1),
+        modelVersion: z.string().min(1).max(200).optional(),
+        provider: z.string().min(1).max(200),
         auditMode: z.enum(["routine", "deep"]),
-        outputHash: z.string().regex(/^[a-f0-9]{64}$/),
-        commitHash: z.string().regex(/^[a-f0-9]{64}$/),
+        outputHash: z.string().regex(hex64Regex),
+        commitHash: z.string().regex(hex64Regex),
         issuedAt: z.string(),
-        commitment: z.object({
-          merkleRoot: z.string().regex(/^[a-f0-9]{64}$/),
-          ioRoot: z.string().regex(/^[a-f0-9]{64}$/),
-          manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
-          inputSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
-          modelSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
-          decodeSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
-          outputSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
-          promptHash: z.string().regex(/^[a-f0-9]{64}$/),
-          seedCommitment: z.string().regex(/^[a-f0-9]{64}$/)
-        }),
-        digest: z.string().regex(/^[a-f0-9]{64}$/)
+        artifacts: z.object({
+          auditBinaryBase64: z.string().min(1),
+          verifierKeyJson: z.string().min(2),
+          verifierKeyId: z.string().min(1).max(200).optional(),
+          auditBinarySha256: z.string().regex(hex64Regex).optional()
+        })
       }),
       createdAt: z.string()
     }),
@@ -138,6 +122,7 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
   if (providedBytes.length !== expectedBytes.length) {
     return null;
   }
+
   if (!timingSafeEqual(providedBytes, expectedBytes)) {
     return null;
   }
@@ -150,87 +135,6 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
     return parsed;
   } catch {
     return null;
-  }
-}
-
-class DigestReceiptVerifier implements CommitReceiptVerifier {
-  public async verifyReceipt(
-    receipt: CommitLLMReceipt,
-    expected: { challengeId: string; outputHash: string; commitHash: string; agentId: string; answer: string }
-  ): Promise<{ valid: boolean; reason?: string }> {
-    if (receipt.challengeId !== expected.challengeId) {
-      return { valid: false, reason: "receipt_challenge_mismatch" };
-    }
-
-    if (receipt.outputHash !== expected.outputHash) {
-      return { valid: false, reason: "receipt_output_hash_mismatch" };
-    }
-
-    if (receipt.commitHash !== expected.commitHash) {
-      return { valid: false, reason: "receipt_commit_hash_mismatch" };
-    }
-
-    const expectedCommitment = computeCommitLLMCommitment({
-      challengeId: expected.challengeId,
-      agentId: expected.agentId,
-      answer: expected.answer,
-      modelOutputHash: expected.outputHash,
-      model: receipt.model,
-      auditMode: receipt.auditMode
-    });
-
-    if (receipt.commitment.merkleRoot !== expectedCommitment.merkleRoot) {
-      return { valid: false, reason: "receipt_merkle_root_mismatch" };
-    }
-
-    if (receipt.commitment.ioRoot !== expectedCommitment.ioRoot) {
-      return { valid: false, reason: "receipt_io_root_mismatch" };
-    }
-
-    if (receipt.commitment.manifestHash !== expectedCommitment.manifestHash) {
-      return { valid: false, reason: "receipt_manifest_hash_mismatch" };
-    }
-
-    if (receipt.commitment.inputSpecHash !== expectedCommitment.inputSpecHash) {
-      return { valid: false, reason: "receipt_input_spec_hash_mismatch" };
-    }
-
-    if (receipt.commitment.modelSpecHash !== expectedCommitment.modelSpecHash) {
-      return { valid: false, reason: "receipt_model_spec_hash_mismatch" };
-    }
-
-    if (receipt.commitment.decodeSpecHash !== expectedCommitment.decodeSpecHash) {
-      return { valid: false, reason: "receipt_decode_spec_hash_mismatch" };
-    }
-
-    if (receipt.commitment.outputSpecHash !== expectedCommitment.outputSpecHash) {
-      return { valid: false, reason: "receipt_output_spec_hash_mismatch" };
-    }
-
-    if (receipt.commitment.promptHash !== expectedCommitment.promptHash) {
-      return { valid: false, reason: "receipt_prompt_hash_mismatch" };
-    }
-
-    if (receipt.commitment.seedCommitment !== expectedCommitment.seedCommitment) {
-      return { valid: false, reason: "receipt_seed_commitment_mismatch" };
-    }
-
-    const expectedDigest = computeCommitLLMDigest({
-      receiptId: receipt.receiptId,
-      challengeId: receipt.challengeId,
-      model: receipt.model,
-      auditMode: receipt.auditMode,
-      outputHash: receipt.outputHash,
-      commitHash: receipt.commitHash,
-      issuedAt: receipt.issuedAt,
-      commitment: receipt.commitment
-    });
-
-    if (receipt.digest !== expectedDigest) {
-      return { valid: false, reason: "receipt_digest_invalid" };
-    }
-
-    return { valid: true };
   }
 }
 
@@ -269,7 +173,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     messages: []
   };
   const agentMap = new Map(config.registeredAgents.map((entry) => [entry.agentId, entry]));
-  const receiptVerifier = new DigestReceiptVerifier();
+  const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMBinaryReceiptVerifier();
 
   app.use(cors());
   app.use(express.json());
@@ -277,6 +181,83 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get("/api/agent-captcha/runbook", (_req, res) => {
+    // Why: surface operator guidance in-app so agents can discover required request contracts.
+    res.json({
+      endpoints: {
+        challenge: {
+          method: "POST",
+          path: "/api/agent-captcha/challenge",
+          requiredHeaders: ["content-type: application/json"],
+          requiredBodyKeys: ["agentId"],
+          responseKeys: ["challenge.challengeId", "challenge.nonce", "challenge.issuedAt", "challenge.expiresAt", "challenge.policy"]
+        },
+        verify: {
+          method: "POST",
+          path: "/api/agent-captcha/verify",
+          requiredHeaders: ["content-type: application/json"],
+          requiredBodyKeys: [
+            "agentId",
+            "proof.payload.challengeId",
+            "proof.payload.answer",
+            "proof.payload.modelOutput",
+            "proof.payload.modelOutputHash",
+            "proof.payload.commitReceipt.challengeId",
+            "proof.payload.commitReceipt.model",
+            "proof.payload.commitReceipt.provider",
+            "proof.payload.commitReceipt.auditMode",
+            "proof.payload.commitReceipt.outputHash",
+            "proof.payload.commitReceipt.commitHash",
+            "proof.payload.commitReceipt.artifacts.auditBinaryBase64",
+            "proof.payload.commitReceipt.artifacts.verifierKeyJson",
+            "proof.signature"
+          ],
+          responseKeys: ["accessToken", "expiresAt"]
+        },
+        postMessage: {
+          method: "POST",
+          path: "/api/messages",
+          requiredHeaders: ["authorization: Bearer <accessToken>", "content-type: application/json"],
+          requiredBodyKeys: ["content", "parentId"],
+          responseKeys: ["message.id", "message.parentId", "message.content", "message.authorAgentId", "message.createdAt"]
+        }
+      },
+      deprecated: {
+        path: "/api/agent-captcha/receipt",
+        status: 410,
+        replacement: "send real CommitLLM artifacts in /api/agent-captcha/verify payload.commitReceipt"
+      },
+      failureCodes: [
+        "invalid_challenge_request",
+        "unknown_agent",
+        "unknown_challenge",
+        "challenge_already_used",
+        "challenge_expired",
+        "challenge_too_old",
+        "agent_mismatch",
+        "agent_public_key_mismatch",
+        "invalid_verify_request",
+        "model_not_allowed",
+        "audit_mode_not_allowed",
+        "commit_hash_mismatch",
+        "receipt_challenge_mismatch",
+        "receipt_output_hash_mismatch",
+        "receipt_commit_hash_mismatch",
+        "commitllm_bridge_execution_failed",
+        "commitllm_bridge_error",
+        "commitllm_verify_v4_failed",
+        "commitllm_audit_binary_sha256_mismatch",
+        "commitllm_verilm_rs_not_installed",
+        "commitllm_verify_v4_binary_failed",
+        "invalid_agent_signature",
+        "missing_access_token",
+        "invalid_access_token",
+        "invalid_message",
+        "unknown_parent"
+      ]
+    });
   });
 
   app.post("/api/agent-captcha/challenge", (req, res) => {
@@ -308,70 +289,11 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     return res.json({ challenge });
   });
 
-  app.post("/api/agent-captcha/receipt", (req, res) => {
-    const parsed = receiptRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: "invalid_receipt_request" });
-    }
-
-    const stored = state.challenges.get(parsed.data.challengeId);
-    if (!stored) {
-      return res.status(404).json({ error: "unknown_challenge" });
-    }
-
-    if (new Date(stored.challenge.expiresAt).getTime() < Date.now()) {
-      return res.status(400).json({ error: "challenge_expired" });
-    }
-
-    const expectedAnswer = computeChallengeAnswer(stored.challenge, stored.expectedAgentId);
-    if (parsed.data.answer !== expectedAnswer) {
-      return res.status(400).json({ error: "invalid_answer" });
-    }
-
-    if (!config.policy.allowedModels.includes(parsed.data.model)) {
-      return res.status(400).json({ error: "model_not_allowed" });
-    }
-
-    if (!config.policy.allowedAuditModes.includes(parsed.data.auditMode)) {
-      return res.status(400).json({ error: "audit_mode_not_allowed" });
-    }
-
-    const outputHash = computeOutputHash(parsed.data.modelOutput);
-    const commitHash = computeCommitHash(
-      parsed.data.challengeId,
-      parsed.data.answer,
-      outputHash,
-      parsed.data.model,
-      parsed.data.auditMode
-    );
-
-    const issuedAt = new Date().toISOString();
-    const commitment = computeCommitLLMCommitment({
-      challengeId: parsed.data.challengeId,
-      agentId: stored.expectedAgentId,
-      answer: parsed.data.answer,
-      modelOutputHash: outputHash,
-      model: parsed.data.model,
-      auditMode: parsed.data.auditMode
+  app.post("/api/agent-captcha/receipt", (_req, res) => {
+    return res.status(410).json({
+      error: "receipt_endpoint_deprecated",
+      message: "MVP synthetic receipts were removed. Provide real CommitLLM artifacts in /api/agent-captcha/verify payload.commitReceipt."
     });
-
-    const unsignedReceipt = {
-      receiptId: randomUUID(),
-      challengeId: parsed.data.challengeId,
-      model: parsed.data.model,
-      auditMode: parsed.data.auditMode,
-      outputHash,
-      commitHash,
-      issuedAt,
-      commitment
-    };
-
-    const receipt: CommitLLMReceipt = {
-      ...unsignedReceipt,
-      digest: computeCommitLLMDigest(unsignedReceipt)
-    };
-
-    return res.json({ receipt });
   });
 
   app.post("/api/agent-captcha/verify", async (req, res) => {

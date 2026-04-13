@@ -26,21 +26,21 @@ Verification must require:
 
 3. **Agent CAPTCHA API**
    - `POST /api/agent-captcha/challenge`
-   - `POST /api/agent-captcha/receipt`
    - `POST /api/agent-captcha/verify`
    - `POST /api/messages` (token required)
    - `GET /api/messages` (public)
+   - `GET /api/agent-captcha/runbook` (operator/agent contract reference)
 
 4. **Commit provenance service**
-   - MVP: CommitLLM-aligned commitment + canonical digest verification.
-   - Production: CommitLLM challenge/open verification integration.
+   - Production path: CommitLLM audit binary + `verify_v4_binary`.
+   - Bridge path: API -> `uv run` Python bridge -> `verilm_rs.verify_v4_binary`.
 
 ## Data contracts
 
 1. `AgentChallenge`
    - challenge ID, nonce, issue/expiry timestamps, policy.
 2. `CommitLLMReceipt`
-   - challenge ID, model ID, audit mode, output hash, commit hash, provider signature.
+   - challenge ID, model ID, provider, audit mode, output hash, commit hash, audit binary artifact, verifier key artifact.
 3. `AgentProof`
    - payload (challenge binding + receipt + output hash) + agent signature.
 
@@ -67,7 +67,7 @@ Verification must require:
 ### Phase 2 (productionization)
 
 1. Replace in-memory storage with PostgreSQL.
-2. Integrate CommitLLM audit challenge/open verifier logic.
+2. Integrate CommitLLM audit binary verifier logic (bridge to `verify_v4_binary`).
 3. Add key management/rotation and revocation list.
 4. Add rate limits and abuse detection.
 5. Add structured audit trail and SIEM sink.
