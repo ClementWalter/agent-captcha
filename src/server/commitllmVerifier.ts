@@ -11,6 +11,7 @@ import {
   COMMITLLM_BINDING_VERSION,
   computeAuditBinarySha256,
   type CommitLLMReceipt,
+  type CommitLLMVerifyReport,
   type CommitReceiptVerifier
 } from "../sdk";
 
@@ -187,6 +188,13 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       return { valid: false, reason: "commitllm_verifier_key_sha256_mismatch" };
     }
 
-    return { valid: true };
+    const normalizedReport: CommitLLMVerifyReport = {
+      passed: report.passed,
+      checksRun: report.checks_run ?? 0,
+      checksPassed: report.checks_passed ?? 0,
+      failures: Array.isArray(report.failures) ? report.failures.slice(0, 32) : [],
+      ...(bridgeResult.verifier_key_id ? { verifierKeyId: bridgeResult.verifier_key_id } : {})
+    };
+    return { valid: true, report: normalizedReport };
   }
 }

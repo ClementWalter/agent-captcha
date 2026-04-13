@@ -12,6 +12,7 @@ import {
   type AgentChallenge,
   type AgentCaptchaPolicy,
   type AgentProof,
+  type CommitLLMVerifyReport,
   type CommitReceiptVerifier,
   verifyAgentProof
 } from "../sdk";
@@ -24,12 +25,31 @@ export interface RegisteredAgent {
   publicKeyHex: string;
 }
 
+/**
+ * Receipt metadata surfaced to clients so the thread UI can render
+ * cryptographic provenance next to each message. These fields come from the
+ * CommitLLM receipt the agent signed over + the Rust verifier's report.
+ */
+export interface MessageProvenance {
+  model: string;
+  provider: string;
+  auditMode: "routine" | "deep";
+  commitHash: string;
+  auditBinarySha256: string;
+  verifierKeySha256: string;
+  verifierKeyId?: string;
+  report: CommitLLMVerifyReport;
+  /** First 120 chars of the modelOutput the agent signed over. */
+  modelOutputHint?: string;
+}
+
 export interface ChatMessage {
   id: string;
   parentId: string | null;
   content: string;
   authorAgentId: string;
   createdAt: string;
+  provenance: MessageProvenance;
 }
 
 interface StoredChallenge {
@@ -38,8 +58,20 @@ interface StoredChallenge {
   consumed: boolean;
 }
 
+/**
+ * Stored per successful /verify call. The verification ID is threaded through
+ * the access token so POST /api/messages can attach the exact provenance that
+ * was checked when minting the token — no client-side claim of provenance.
+ */
+interface VerificationRecord {
+  verifyId: string;
+  agentId: string;
+  provenance: MessageProvenance;
+}
+
 interface AgentTokenPayload {
   agentId: string;
+  verifyId: string;
   exp: number;
 }
 
@@ -55,6 +87,7 @@ export interface AppConfig {
 interface AppState {
   challenges: Map<string, StoredChallenge>;
   messages: ChatMessage[];
+  verifications: Map<string, VerificationRecord>;
   migrationTelemetry: {
     receiptDeprecatedCalls: number;
     verifyAliasCalls: number;
@@ -198,6 +231,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
     messages: [],
+    verifications: new Map<string, VerificationRecord>(),
     migrationTelemetry: {
       receiptDeprecatedCalls: 0,
       verifyAliasCalls: 0,
@@ -493,10 +527,37 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return;
     }
 
+    // Record the provenance for this verify call. The post endpoint looks it
+    // up by verifyId (carried in the access token) so clients can't claim any
+    // provenance we didn't check.
+    const receipt = payload.proof.payload.commitReceipt;
+    const verifyId = randomUUID();
+    const provenance: MessageProvenance = {
+      model: receipt.model,
+      provider: receipt.provider,
+      auditMode: receipt.auditMode,
+      commitHash: receipt.commitHash,
+      auditBinarySha256: receipt.artifacts.auditBinarySha256 ?? "",
+      verifierKeySha256: receipt.artifacts.verifierKeySha256,
+      ...(receipt.artifacts.verifierKeyId ? { verifierKeyId: receipt.artifacts.verifierKeyId } : {}),
+      report: verification.report ?? { passed: true, checksRun: 0, checksPassed: 0, failures: [] },
+      // Snippet of the modelOutput signed by the agent. We cap length to
+      // keep the thread feed compact.
+      modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120)
+    };
+    state.verifications.set(verifyId, { verifyId, agentId: payload.agentId, provenance });
+
     stored.consumed = true;
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
-    const accessToken = createToken({ agentId: payload.agentId, exp: expSeconds }, config.accessTokenSecret);
-    res.json({ accessToken, expiresAt: new Date(expSeconds * 1000).toISOString() });
+    const accessToken = createToken(
+      { agentId: payload.agentId, verifyId, exp: expSeconds },
+      config.accessTokenSecret
+    );
+    res.json({
+      accessToken,
+      expiresAt: new Date(expSeconds * 1000).toISOString(),
+      provenance
+    });
   }
 
   app.post(VERIFY_V2_PATH, (req, res) => {
@@ -521,7 +582,8 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return;
     }
 
-    (req as Request & { agentId: string }).agentId = parsed.agentId;
+    (req as Request & { agentId: string; verifyId: string }).agentId = parsed.agentId;
+    (req as Request & { agentId: string; verifyId: string }).verifyId = parsed.verifyId;
     next();
   }
 
@@ -539,12 +601,23 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return res.status(400).json({ error: "unknown_parent" });
     }
 
+    const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
+    const record = state.verifications.get(verifyId);
+    if (!record || record.agentId !== agentId) {
+      return res.status(401).json({ error: "unknown_verification" });
+    }
+
+    // One verification record = one post. Prevent token reuse for multiple
+    // messages so provenance always pairs 1:1 with a verified inference.
+    state.verifications.delete(verifyId);
+
     const message: ChatMessage = {
       id: randomUUID(),
       parentId: parsed.data.parentId ?? null,
       content: parsed.data.content,
-      authorAgentId: (req as Request & { agentId: string }).agentId,
-      createdAt: new Date().toISOString()
+      authorAgentId: agentId,
+      createdAt: new Date().toISOString(),
+      provenance: record.provenance
     };
 
     state.messages.push(message);

@@ -5,8 +5,6 @@
 const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
 const refreshButton = document.getElementById("refresh-button");
-const runbookElement = document.getElementById("runbook");
-const migrationStatusElement = document.getElementById("migration-status");
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -43,6 +41,80 @@ function setRefreshButtonBusy(isBusy) {
   refreshButton.textContent = isBusy ? "Refreshing..." : "Refresh";
 }
 
+function shortHash(hex) {
+  if (typeof hex !== "string" || hex.length < 16) {
+    return hex ?? "";
+  }
+  return `${hex.slice(0, 8)}…${hex.slice(-6)}`;
+}
+
+function renderProvenance(provenance) {
+  const wrapper = document.createElement("footer");
+  wrapper.className = "message-provenance";
+
+  const report = provenance.report ?? {};
+  const passed = report.passed === true;
+  const checksRun = typeof report.checksRun === "number" ? report.checksRun : 0;
+  const checksPassed = typeof report.checksPassed === "number" ? report.checksPassed : 0;
+
+  const badge = document.createElement("span");
+  badge.className = `provenance-badge ${passed ? "ok" : "warn"}`;
+  badge.textContent = passed
+    ? `CommitLLM ✓ ${checksPassed}/${checksRun}`
+    : `CommitLLM ran ${checksPassed}/${checksRun}`;
+  wrapper.append(badge);
+
+  const modelSpan = document.createElement("span");
+  modelSpan.className = "provenance-field";
+  modelSpan.textContent = `model · ${provenance.model}`;
+  wrapper.append(modelSpan);
+
+  const commitSpan = document.createElement("span");
+  commitSpan.className = "provenance-field mono";
+  commitSpan.textContent = `commit · ${shortHash(provenance.commitHash)}`;
+  wrapper.append(commitSpan);
+
+  const keySpan = document.createElement("span");
+  keySpan.className = "provenance-field mono";
+  keySpan.textContent = `key · ${shortHash(provenance.verifierKeySha256)}`;
+  wrapper.append(keySpan);
+
+  const auditSpan = document.createElement("span");
+  auditSpan.className = "provenance-field mono";
+  auditSpan.textContent = `audit · ${shortHash(provenance.auditBinarySha256)}`;
+  wrapper.append(auditSpan);
+
+  if (provenance.modelOutputHint) {
+    const prompt = document.createElement("details");
+    prompt.className = "provenance-prompt";
+    const summary = document.createElement("summary");
+    summary.textContent = "Raw model output (signed by agent)";
+    prompt.append(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = provenance.modelOutputHint;
+    prompt.append(pre);
+    wrapper.append(prompt);
+  }
+
+  if (!passed && Array.isArray(report.failures) && report.failures.length > 0) {
+    const failures = document.createElement("details");
+    failures.className = "provenance-failures";
+    const summary = document.createElement("summary");
+    summary.textContent = `Verifier flagged ${report.failures.length} check(s)`;
+    failures.append(summary);
+    const list = document.createElement("ul");
+    for (const failure of report.failures.slice(0, 8)) {
+      const li = document.createElement("li");
+      li.textContent = failure;
+      list.append(li);
+    }
+    failures.append(list);
+    wrapper.append(failures);
+  }
+
+  return wrapper;
+}
+
 function renderMessageNode(message, byParent) {
   const listItem = document.createElement("li");
   listItem.className = "message-item";
@@ -57,6 +129,10 @@ function renderMessageNode(message, byParent) {
   content.className = "message-content";
   content.textContent = message.content;
   listItem.append(content);
+
+  if (message.provenance) {
+    listItem.append(renderProvenance(message.provenance));
+  }
 
   const children = byParent.get(message.id) ?? [];
   if (children.length > 0) {
@@ -119,47 +195,19 @@ async function refreshMessages() {
   }
 }
 
-async function refreshRunbook() {
-  try {
-    const response = await fetch("/api/agent-captcha/runbook", { method: "GET" });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${await response.text()}`);
-    }
-
-    const runbook = await response.json();
-    runbookElement.textContent = JSON.stringify(runbook, null, 2);
-  } catch (error) {
-    runbookElement.textContent = `Runbook load failed: ${error.message}`;
-  }
-}
-
-async function refreshMigrationStatus() {
-  try {
-    const response = await fetch("/api/agent-captcha/migration-status", { method: "GET" });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${await response.text()}`);
-    }
-
-    const migrationStatus = await response.json();
-    migrationStatusElement.textContent = JSON.stringify(migrationStatus, null, 2);
-  } catch (error) {
-    migrationStatusElement.textContent = `Migration telemetry load failed: ${error.message}`;
-  }
-}
-
 refreshButton.addEventListener("click", () => {
   refreshMessages().catch((error) => {
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
 });
 
-Promise.all([refreshMessages(), refreshRunbook(), refreshMigrationStatus()]).catch((error) => {
+refreshMessages().catch((error) => {
   setThreadStatus(`Initial load failed: ${error.message}`);
 });
 
 window.setInterval(() => {
-  Promise.all([refreshMessages(), refreshMigrationStatus()]).catch((error) => {
-    // Why: polling failures should not break the read-only client.
+  refreshMessages().catch((error) => {
+    // Polling failures must not break the read-only client.
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
 }, 5000);

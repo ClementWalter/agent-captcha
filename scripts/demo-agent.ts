@@ -1,12 +1,8 @@
 /**
  * Demo agent client.
- * Why: run a real CommitLLM inference via the Modal sidecar, turn the returned
- * commitment + audit binary into an agent-captcha receipt, then post a message
- * through the agent-captcha `/api/v2/agent-captcha/verify` flow.
- *
- * Previous iteration expected pre-baked CommitLLM artifacts via env vars. This
- * version drives the whole pipeline end-to-end: challenge → inference → audit →
- * proof → post.
+ * Why: showcase the natural agent-captcha flow — send a prompt, Qwen-on-Modal
+ * produces an answer, that answer is the post, and the receipt chain (real
+ * CommitLLM v4 audit + Rust `verify_v4_binary`) is attached server-side.
  */
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
@@ -25,8 +21,7 @@ import {
 
 const logger = pino({ name: "agent-captcha-demo-agent" });
 
-// Demo key pair pre-registered on the server. In production the agent would
-// own a real key; this one is pinned to demo-agent-001.
+// Demo key pair pre-registered on the server.
 const demoSigner = {
   agentId: "demo-agent-001",
   privateKeyHex: "1f1e1d1c1b1a19181716151413121110f0e0d0c0b0a090807060504030201000",
@@ -58,12 +53,10 @@ async function postJson<T>(url: string, body: unknown, token?: string): Promise<
     },
     body: JSON.stringify(body)
   });
-
   if (!response.ok) {
     const errorBody = await response.text();
     throw new Error(`POST ${url} failed (${response.status}): ${errorBody}`);
   }
-
   return (await response.json()) as T;
 }
 
@@ -103,28 +96,41 @@ function requireEnv(name: string): string {
 }
 
 /**
- * Canonical, stable identifier for a CommitLLM commitment.
- * Why: the agent-captcha receipt binds a `commitHash` field — we derive it
- * deterministically from the commitment dict returned by /v1/chat so that
- * verifier and agent agree on the same value.
+ * Stable SHA256 identifier of a CommitLLM commitment. Both sides derive it
+ * deterministically from the commitment dict — the receipt binds to it via
+ * `commitHash`.
  */
 function computeCommitHash(commitment: Record<string, unknown>): string {
   const canonical = JSON.stringify(commitment, Object.keys(commitment).sort());
   return bytesToHex(sha256(utf8ToBytes(canonical)));
 }
 
+/**
+ * Extract the first CLI positional argument as the prompt, fall back to env,
+ * fall back to a sensible demo question. Anything after `--` is treated as
+ * one prompt string so you can write `npm run demo:agent -- What is 2+2?`.
+ */
+function resolvePrompt(): string {
+  const argv = process.argv.slice(2);
+  if (argv.length > 0) {
+    return argv.join(" ");
+  }
+  return process.env.AGENT_CAPTCHA_PROMPT ?? "What is the capital of France? Answer with just the city name.";
+}
+
 async function run(): Promise<void> {
   const baseUrl = process.env.AGENT_CAPTCHA_BASE_URL ?? "http://localhost:4173";
   const sidecarUrl = requireEnv("MODAL_SIDECAR_URL").replace(/\/+$/, "");
-  const userMessage = process.env.AGENT_CAPTCHA_MESSAGE ?? "Hello from a verified agent";
+  const prompt = resolvePrompt();
   // Must match the server's allowed models policy (see src/server/app.ts).
   const model = process.env.AGENT_CAPTCHA_MODEL ?? "qwen2.5-7b-w8a8";
   const provider = process.env.AGENT_CAPTCHA_PROVIDER ?? "commitllm";
   const modelVersion = process.env.AGENT_CAPTCHA_MODEL_VERSION;
   const auditMode = resolveAuditMode(process.env.AGENT_CAPTCHA_AUDIT_MODE);
+  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "32");
 
-  // Step 1: fetch challenge from the agent-captcha server.
-  logger.info({ baseUrl, agentId: demoSigner.agentId }, "Requesting challenge");
+  // 1. Fetch challenge.
+  logger.info({ baseUrl, agentId: demoSigner.agentId, prompt }, "Requesting challenge");
   const challengeResponse = await postJson<{ challenge: AgentChallenge }>(
     `${baseUrl}/api/agent-captcha/challenge`,
     { agentId: demoSigner.agentId }
@@ -132,44 +138,34 @@ async function run(): Promise<void> {
   const challenge = challengeResponse.challenge;
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
 
-  // Step 2: run real inference on Modal. The default prompt embeds the
-  // challenge answer so the LLM output is observably bound to this attempt;
-  // override via AGENT_CAPTCHA_PROMPT to send anything you want. The protocol
-  // doesn't require the answer to appear in the generated text — the answer
-  // is carried separately and signed independently.
-  const defaultPrompt = `You are agent ${demoSigner.agentId}. Acknowledge challenge ${challenge.challengeId} with answer ${answer}. Respond concisely.`;
-  const prompt = process.env.AGENT_CAPTCHA_PROMPT ?? defaultPrompt;
-  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "16");
-  logger.info({ sidecarUrl, prompt, n_tokens: nTokens }, "Running verified inference");
+  // 2. Real inference on Modal GPU. The LLM's generated text IS the post.
+  logger.info({ sidecarUrl, n_tokens: nTokens }, "Running verified inference");
   const chat = await postJson<ChatResponse>(`${sidecarUrl}/v1/chat`, {
     prompt,
     n_tokens: nTokens,
-    temperature: 0,
+    temperature: 0
   });
 
-  const modelOutput = chat.generated_text;
-  const modelOutputHash = computeOutputHash(modelOutput);
+  const modelOutput = chat.generated_text.trim();
+  const modelOutputHash = computeOutputHash(chat.generated_text);
 
-  // Step 3: open an audit at the first generated token across the routine
-  // 10-layer window. Keeping layer_indices explicit (rather than []) makes
-  // the audit binary deterministically sized for the verifier.
+  // 3. Open the audit binary for the first generated token over 10 layers.
   logger.info({ request_id: chat.request_id }, "Opening audit binary");
   const auditBinaryBytes = await postForBinary(`${sidecarUrl}/v1/audit`, {
     request_id: chat.request_id,
     token_index: chat.token_ids.length - chat.n_tokens,
     layer_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
     tier: auditMode,
-    binary: true,
+    binary: true
   });
   const auditBinaryBase64 = Buffer.from(auditBinaryBytes).toString("base64");
 
-  // Step 4: fetch the verifier key identity. The full JSON is held by the
-  // sidecar (>1GB for a 7B model) — we only bind to its SHA256.
+  // 4. Fetch the verifier key identity (SHA256 only — full key is ~1GB).
   const keyResponse = await getJson<KeyResponse>(`${sidecarUrl}/key`);
   const verifierKeySha256 = keyResponse.verifier_key_sha256;
   const verifierKeyId = keyResponse.verifier_key_id;
 
-  // Step 5: compute receipt + binding hash and sign the proof.
+  // 5. Build receipt + binding hash and sign the proof.
   const commitHash = computeCommitHash(chat.commitment);
   const auditBinarySha256 = computeAuditBinarySha256(auditBinaryBase64);
 
@@ -204,29 +200,30 @@ async function run(): Promise<void> {
   const proof = await createAgentProof({
     challenge,
     signer: demoSigner,
-    modelOutput,
+    modelOutput: chat.generated_text,
     model,
     auditMode,
     commitReceipt
   });
 
-  // Step 6: submit proof → receive access token → post message.
+  // 6. Verify → access token → post the LLM's answer as the message content.
   logger.info("Submitting proof for verification");
-  const verification = await postJson<{ accessToken: string; expiresAt: string }>(
-    `${baseUrl}/api/v2/agent-captcha/verify`,
-    { agentId: demoSigner.agentId, proof }
-  );
+  const verification = await postJson<{
+    accessToken: string;
+    expiresAt: string;
+    provenance?: unknown;
+  }>(`${baseUrl}/api/v2/agent-captcha/verify`, { agentId: demoSigner.agentId, proof });
 
-  const messageResponse = await postJson<{ message: { id: string } }>(
+  const messageResponse = await postJson<{ message: { id: string; content: string } }>(
     `${baseUrl}/api/messages`,
-    { content: userMessage, parentId: null },
+    { content: modelOutput, parentId: null },
     verification.accessToken
   );
 
   logger.info(
     {
       messageId: messageResponse.message.id,
-      modelOutput,
+      posted: messageResponse.message.content,
       auditBinaryBytes: auditBinaryBytes.length,
       commitHash,
       tokenExpiresAt: verification.expiresAt

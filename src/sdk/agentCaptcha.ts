@@ -81,6 +81,20 @@ export interface AgentSigner {
   publicKeyHex: string;
 }
 
+/**
+ * Structured CommitLLM verification report surfaced by the remote verifier.
+ * `passed` is the Rust `verify_v4_binary` overall result; the raw
+ * checks/failures are exposed so UIs can show provenance next to each
+ * message.
+ */
+export interface CommitLLMVerifyReport {
+  passed: boolean;
+  checksRun: number;
+  checksPassed: number;
+  failures: string[];
+  verifierKeyId?: string;
+}
+
 export interface CommitReceiptVerifier {
   verifyReceipt(
     receipt: CommitLLMReceipt,
@@ -95,7 +109,7 @@ export interface CommitReceiptVerifier {
       agentId: string;
       answer: string;
     }
-  ): Promise<{ valid: boolean; reason?: string }>;
+  ): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }>;
 }
 
 function sha256Hex(value: string): string {
@@ -290,7 +304,7 @@ export async function verifyAgentProof(input: {
   expectedAgentId: string;
   verifier: CommitReceiptVerifier;
   now?: Date;
-}): Promise<{ valid: boolean; reason?: string }> {
+}): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }> {
   const now = input.now ?? new Date();
   if (new Date(input.challenge.expiresAt).getTime() < now.getTime()) {
     return { valid: false, reason: "challenge_expired" };
@@ -382,5 +396,5 @@ export async function verifyAgentProof(input: {
     return { valid: false, reason: "challenge_too_old" };
   }
 
-  return { valid: true };
+  return { valid: true, ...(receiptResult.report ? { report: receiptResult.report } : {}) };
 }
