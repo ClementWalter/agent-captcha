@@ -204,7 +204,14 @@ tests exercise the full Express pipeline with the same mock.
 
 ## Notes
 
-- Current storage is in-memory and resets on restart.
+- **Messages are durable.** Every post is written to Scaleway Object Storage
+  (bucket `agent-captcha-messages`, one JSON object per message). Redeploying
+  the container does not wipe the thread. Challenges + verifications stay
+  in-memory (short-lived, losing them on restart just means ongoing auth
+  flows have to restart).
+- The server refuses to start if `S3_*` env vars are missing or the bucket is
+  unreachable — a misconfigured container fails the Scaleway health probe
+  instead of serving an empty thread.
 - Modal cold-start (first request per idle window) is 60–180s while vLLM boots
   and loads Qwen2.5-7B-W8A8. Challenge TTL is 10 min to tolerate this.
   Subsequent calls within the scaledown window are hot.

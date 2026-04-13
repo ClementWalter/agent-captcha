@@ -15,7 +15,28 @@ import {
   type CommitLLMReceipt
 } from "../../src/sdk";
 import { CommitLLMModalReceiptVerifier } from "../../src/server/commitllmVerifier";
+import type { MessageStore } from "../../src/server/messageStore";
+import type { ChatMessage } from "../../src/server/app";
 import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
+
+/**
+ * In-memory store — e2e tests are about protocol correctness, not durability,
+ * so we swap out the S3-backed production store for a plain array.
+ */
+function createInMemoryMessageStore(): MessageStore {
+  const messages: ChatMessage[] = [];
+  return {
+    async append(message) {
+      messages.push(message);
+    },
+    async list() {
+      return messages.slice();
+    },
+    async healthCheck() {
+      // Always healthy in tests.
+    }
+  };
+}
 
 const demoSigner = {
   agentId: "demo-agent-001",
@@ -133,7 +154,7 @@ async function authenticateAgent(api: ReturnType<typeof request>): Promise<strin
 }
 
 describe("chat flow", () => {
-  const { app } = createApp({ commitReceiptVerifier: createPassingVerifier() });
+  const { app } = createApp({ commitReceiptVerifier: createPassingVerifier(), messageStore: createInMemoryMessageStore() });
   const api = request(app);
 
   it("rejects messages without token", async () => {
@@ -205,7 +226,8 @@ describe("chat flow", () => {
   it("rejects expired challenges", async () => {
     const { app: expiringApp } = createApp({
       challengeTtlMs: 1,
-      commitReceiptVerifier: createPassingVerifier()
+      commitReceiptVerifier: createPassingVerifier(),
+      messageStore: createInMemoryMessageStore()
     });
     const expiringApi = request(expiringApp);
 

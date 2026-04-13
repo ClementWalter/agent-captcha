@@ -17,6 +17,7 @@ import {
   verifyAgentProof
 } from "../sdk";
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
+import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
 
 const logger = pino({ name: "agent-captcha-api" });
 
@@ -82,11 +83,11 @@ export interface AppConfig {
   policy: AgentCaptchaPolicy;
   registeredAgents: RegisteredAgent[];
   commitReceiptVerifier?: CommitReceiptVerifier;
+  messageStore?: MessageStore;
 }
 
 interface AppState {
   challenges: Map<string, StoredChallenge>;
-  messages: ChatMessage[];
   verifications: Map<string, VerificationRecord>;
   migrationTelemetry: {
     receiptDeprecatedCalls: number;
@@ -230,7 +231,6 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   const app = express();
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
-    messages: [],
     verifications: new Map<string, VerificationRecord>(),
     migrationTelemetry: {
       receiptDeprecatedCalls: 0,
@@ -249,6 +249,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMModalReceiptVerifier({
     sidecarUrl: modalSidecarUrl!
   });
+  const messageStore: MessageStore = config.messageStore ?? createMessageStoreFromEnv();
 
   app.use(cors());
   // Audit binaries from CommitLLM receipts can be a few MB — lift the default
@@ -587,41 +588,54 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     next();
   }
 
-  app.get("/api/messages", (_req, res) => {
-    res.json({ messages: state.messages });
+  app.get("/api/messages", (_req, res, next) => {
+    messageStore
+      .list()
+      .then((messages) => {
+        res.json({ messages });
+      })
+      .catch(next);
   });
 
-  app.post("/api/messages", requireAgentToken, (req, res) => {
-    const parsed = messageSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: "invalid_message" });
+  app.post("/api/messages", requireAgentToken, async (req, res, next) => {
+    try {
+      const parsed = messageSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "invalid_message" });
+      }
+
+      if (parsed.data.parentId) {
+        const existing = await messageStore.list();
+        if (!existing.some((message) => message.id === parsed.data.parentId)) {
+          return res.status(400).json({ error: "unknown_parent" });
+        }
+      }
+
+      const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
+      const record = state.verifications.get(verifyId);
+      if (!record || record.agentId !== agentId) {
+        return res.status(401).json({ error: "unknown_verification" });
+      }
+
+      const message: ChatMessage = {
+        id: randomUUID(),
+        parentId: parsed.data.parentId ?? null,
+        content: parsed.data.content,
+        authorAgentId: agentId,
+        createdAt: new Date().toISOString(),
+        provenance: record.provenance
+      };
+
+      // Persist before deleting the verification record so a storage outage
+      // doesn't silently consume a valid token without posting. If the write
+      // throws, the client can retry with the same token until it succeeds.
+      await messageStore.append(message);
+      state.verifications.delete(verifyId);
+
+      return res.status(201).json({ message });
+    } catch (error) {
+      return next(error);
     }
-
-    if (parsed.data.parentId && !state.messages.some((message) => message.id === parsed.data.parentId)) {
-      return res.status(400).json({ error: "unknown_parent" });
-    }
-
-    const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
-    const record = state.verifications.get(verifyId);
-    if (!record || record.agentId !== agentId) {
-      return res.status(401).json({ error: "unknown_verification" });
-    }
-
-    // One verification record = one post. Prevent token reuse for multiple
-    // messages so provenance always pairs 1:1 with a verified inference.
-    state.verifications.delete(verifyId);
-
-    const message: ChatMessage = {
-      id: randomUUID(),
-      parentId: parsed.data.parentId ?? null,
-      content: parsed.data.content,
-      authorAgentId: agentId,
-      createdAt: new Date().toISOString(),
-      provenance: record.provenance
-    };
-
-    state.messages.push(message);
-    return res.status(201).json({ message });
   });
 
   app.get("*", (_req, res) => {
