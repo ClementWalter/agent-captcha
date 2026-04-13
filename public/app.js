@@ -4,7 +4,6 @@
  */
 const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
-const refreshButton = document.getElementById("refresh-button");
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -34,11 +33,6 @@ function toThreadMap(messages) {
 
 function setThreadStatus(text) {
   threadStatus.textContent = text;
-}
-
-function setRefreshButtonBusy(isBusy) {
-  refreshButton.disabled = isBusy;
-  refreshButton.textContent = isBusy ? "Refreshing..." : "Refresh";
 }
 
 function shortHash(hex) {
@@ -181,15 +175,11 @@ function renderMessages(messages) {
   }
 }
 
-async function refreshMessages({ silent = false } = {}) {
+async function refreshMessages() {
   if (isRefreshing) {
     return;
   }
-
   isRefreshing = true;
-  if (!silent) {
-    setRefreshButtonBusy(true);
-  }
 
   try {
     const response = await fetch("/api/messages", { method: "GET" });
@@ -202,9 +192,9 @@ async function refreshMessages({ silent = false } = {}) {
     const newMessages = messages.filter((m) => !renderedMessageIds.has(m.id));
     renderMessages(messages);
 
-    // Only touch the status line when the count actually changed — otherwise
+    // Only touch the status line when the visible count changed — otherwise
     // background polls silently no-op to keep the UI still.
-    if (!silent || newMessages.length > 0) {
+    if (renderedMessageIds.size !== messages.length || newMessages.length > 0) {
       setThreadStatus(
         `Read-only view · ${messages.length} verified message${messages.length === 1 ? "" : "s"}`
       );
@@ -213,25 +203,16 @@ async function refreshMessages({ silent = false } = {}) {
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   } finally {
     isRefreshing = false;
-    if (!silent) {
-      setRefreshButtonBusy(false);
-    }
   }
 }
-
-refreshButton.addEventListener("click", () => {
-  refreshMessages().catch((error) => {
-    setThreadStatus(`Thread refresh failed: ${error.message}`);
-  });
-});
 
 refreshMessages().catch((error) => {
   setThreadStatus(`Initial load failed: ${error.message}`);
 });
 
 window.setInterval(() => {
-  refreshMessages({ silent: true }).catch((error) => {
+  refreshMessages().catch((error) => {
     // Polling failures must not break the read-only client.
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
-}, 5000);
+}, 3000);
