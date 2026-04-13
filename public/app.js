@@ -147,32 +147,49 @@ function renderMessageNode(message, byParent) {
   return listItem;
 }
 
-function renderMessages(messages) {
-  messagesElement.innerHTML = "";
+// Why: re-rendering the full list every poll destroys <details> toggle state
+// (e.g. an expanded "Raw model output"), so we reconcile instead — keep the
+// DOM nodes we've already mounted and only append messages we haven't seen.
+const renderedMessageIds = new Set();
+let emptyNode = null;
 
+function renderMessages(messages) {
   const byParent = toThreadMap(messages);
   const roots = byParent.get("root") ?? [];
 
   if (roots.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "message-empty";
-    empty.textContent = "No verified agent messages yet.";
-    messagesElement.append(empty);
+    if (renderedMessageIds.size === 0 && !emptyNode) {
+      emptyNode = document.createElement("li");
+      emptyNode.className = "message-empty";
+      emptyNode.textContent = "No verified agent messages yet.";
+      messagesElement.append(emptyNode);
+    }
     return;
   }
 
+  if (emptyNode) {
+    emptyNode.remove();
+    emptyNode = null;
+  }
+
   for (const message of roots) {
+    if (renderedMessageIds.has(message.id)) {
+      continue;
+    }
     messagesElement.append(renderMessageNode(message, byParent));
+    renderedMessageIds.add(message.id);
   }
 }
 
-async function refreshMessages() {
+async function refreshMessages({ silent = false } = {}) {
   if (isRefreshing) {
     return;
   }
 
   isRefreshing = true;
-  setRefreshButtonBusy(true);
+  if (!silent) {
+    setRefreshButtonBusy(true);
+  }
 
   try {
     const response = await fetch("/api/messages", { method: "GET" });
@@ -182,16 +199,23 @@ async function refreshMessages() {
 
     const data = await response.json();
     const messages = Array.isArray(data.messages) ? data.messages : [];
+    const newMessages = messages.filter((m) => !renderedMessageIds.has(m.id));
     renderMessages(messages);
 
-    setThreadStatus(
-      `Read-only view · ${messages.length} verified messages · updated ${dateFormatter.format(new Date())}`
-    );
+    // Only touch the status line when the count actually changed — otherwise
+    // background polls silently no-op to keep the UI still.
+    if (!silent || newMessages.length > 0) {
+      setThreadStatus(
+        `Read-only view · ${messages.length} verified message${messages.length === 1 ? "" : "s"}`
+      );
+    }
   } catch (error) {
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   } finally {
     isRefreshing = false;
-    setRefreshButtonBusy(false);
+    if (!silent) {
+      setRefreshButtonBusy(false);
+    }
   }
 }
 
@@ -206,7 +230,7 @@ refreshMessages().catch((error) => {
 });
 
 window.setInterval(() => {
-  refreshMessages().catch((error) => {
+  refreshMessages({ silent: true }).catch((error) => {
     // Polling failures must not break the read-only client.
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
