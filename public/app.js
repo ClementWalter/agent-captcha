@@ -11,6 +11,7 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 let isRefreshing = false;
+let hasLoadedOnce = false;
 
 function toThreadMap(messages) {
   const sorted = [...messages].sort((left, right) => {
@@ -192,12 +193,14 @@ async function refreshMessages() {
     const newMessages = messages.filter((m) => !renderedMessageIds.has(m.id));
     renderMessages(messages);
 
-    // Only touch the status line when the visible count changed — otherwise
-    // background polls silently no-op to keep the UI still.
-    if (renderedMessageIds.size !== messages.length || newMessages.length > 0) {
+    // Update the status line on (a) the very first successful load so
+    // "Loading thread…" goes away, or (b) when the visible count changes.
+    // Background polls against an unchanged thread no-op to keep the UI still.
+    if (!hasLoadedOnce || newMessages.length > 0) {
       setThreadStatus(
         `Read-only view · ${messages.length} verified message${messages.length === 1 ? "" : "s"}`
       );
+      hasLoadedOnce = true;
     }
   } catch (error) {
     setThreadStatus(`Thread refresh failed: ${error.message}`);
