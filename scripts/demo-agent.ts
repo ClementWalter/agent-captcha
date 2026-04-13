@@ -118,6 +118,31 @@ function resolvePrompt(): string {
   return process.env.AGENT_CAPTCHA_PROMPT ?? "What is the capital of France? Answer with just the city name.";
 }
 
+/**
+ * Probe the sidecar and report whether it's already warm. Lets us show a
+ * one-line "cold-start incoming" hint so a 2-minute silence doesn't feel
+ * like a hung CLI.
+ */
+async function probeSidecarWarmth(sidecarUrl: string): Promise<{ warm: boolean; ms: number }> {
+  const start = Date.now();
+  try {
+    const response = await fetch(`${sidecarUrl}/health`, { signal: AbortSignal.timeout(3000) });
+    const ms = Date.now() - start;
+    return { warm: response.ok && ms < 2500, ms };
+  } catch {
+    return { warm: false, ms: Date.now() - start };
+  }
+}
+
+function startHeartbeat(label: string, intervalMs = 15_000): () => void {
+  const start = Date.now();
+  const timer = setInterval(() => {
+    const elapsed = ((Date.now() - start) / 1000).toFixed(0);
+    logger.info({ elapsedSeconds: Number(elapsed) }, `${label}…`);
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 async function run(): Promise<void> {
   const baseUrl = process.env.AGENT_CAPTCHA_BASE_URL ?? "http://localhost:4173";
   const sidecarUrl = requireEnv("MODAL_SIDECAR_URL").replace(/\/+$/, "");
@@ -128,6 +153,17 @@ async function run(): Promise<void> {
   const modelVersion = process.env.AGENT_CAPTCHA_MODEL_VERSION;
   const auditMode = resolveAuditMode(process.env.AGENT_CAPTCHA_AUDIT_MODE);
   const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "32");
+
+  // Probe the sidecar first so the first slow call — which is silent on the
+  // wire — is preceded by a visible "waking GPU" hint. Users kept assuming
+  // the CLI had hung during Modal cold starts.
+  const warmth = await probeSidecarWarmth(sidecarUrl);
+  if (!warmth.warm) {
+    logger.warn(
+      { healthMs: warmth.ms },
+      "Modal sidecar looks cold — cold start is 60–180s (vLLM boot + Qwen-7B weight load). Hang tight."
+    );
+  }
 
   // 1. Fetch challenge.
   logger.info({ baseUrl, agentId: demoSigner.agentId, prompt }, "Requesting challenge");
@@ -140,11 +176,19 @@ async function run(): Promise<void> {
 
   // 2. Real inference on Modal GPU. The LLM's generated text IS the post.
   logger.info({ sidecarUrl, n_tokens: nTokens }, "Running verified inference");
-  const chat = await postJson<ChatResponse>(`${sidecarUrl}/v1/chat`, {
-    prompt,
-    n_tokens: nTokens,
-    temperature: 0
-  });
+  const chatTimer = Date.now();
+  const stopChatHeartbeat = startHeartbeat("still waiting for GPU inference");
+  let chat: ChatResponse;
+  try {
+    chat = await postJson<ChatResponse>(`${sidecarUrl}/v1/chat`, {
+      prompt,
+      n_tokens: nTokens,
+      temperature: 0
+    });
+  } finally {
+    stopChatHeartbeat();
+  }
+  logger.info({ inferenceMs: Date.now() - chatTimer, generated: chat.generated_text.slice(0, 80) }, "inference done");
 
   const modelOutput = chat.generated_text.trim();
   const modelOutputHash = computeOutputHash(chat.generated_text);
