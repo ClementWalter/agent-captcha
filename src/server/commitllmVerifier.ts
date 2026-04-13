@@ -3,13 +3,19 @@
  * Why: enforce real CommitLLM verification via audit binary + verify_v4_binary
  * instead of trusting synthetic digest fields from the MVP implementation.
  */
-import { createHash } from "crypto";
 import path from "path";
 import { spawn } from "child_process";
 import pino from "pino";
-import { type CommitLLMReceipt, type CommitReceiptVerifier } from "../sdk";
+import {
+  COMMITLLM_BINDING_VERSION,
+  computeAuditBinarySha256,
+  computeVerifierKeySha256,
+  type CommitLLMReceipt,
+  type CommitReceiptVerifier
+} from "../sdk";
 
 const logger = pino({ name: "agent-captcha-commitllm-verifier" });
+const BRIDGE_PROTOCOL_VERSION = "agent-captcha-commitllm-bridge-v1";
 
 export interface CommitLLMBridgeRequest {
   audit_binary_base64: string;
@@ -36,6 +42,9 @@ export interface CommitLLMBridgeReport {
 export interface CommitLLMBridgeResponse {
   ok: boolean;
   audit_binary_sha256?: string;
+  verifier_key_sha256?: string;
+  bridge_protocol_version?: string;
+  verilm_rs_version?: string;
   report?: CommitLLMBridgeReport;
   error?: string;
   error_detail?: string;
@@ -44,6 +53,11 @@ export interface CommitLLMBridgeResponse {
 export interface CommitLLMBridgeRuntimeOptions {
   scriptPath: string;
   timeoutMs: number;
+  stdoutMaxBytes: number;
+  maxAuditBinaryBytes: number;
+  maxVerifierKeyJsonBytes: number;
+  bridgeCpuLimitSeconds: number;
+  bridgeMemoryLimitBytes: number;
 }
 
 export type CommitLLMBridgeRunner = (
@@ -54,6 +68,13 @@ export type CommitLLMBridgeRunner = (
 export interface CommitLLMBinaryReceiptVerifierConfig {
   bridgeScriptPath?: string;
   timeoutMs?: number;
+  stdoutMaxBytes?: number;
+  maxAuditBinaryBytes?: number;
+  maxVerifierKeyJsonBytes?: number;
+  bridgeCpuLimitSeconds?: number;
+  bridgeMemoryLimitBytes?: number;
+  expectedBridgeProtocolVersion?: string;
+  expectedVerilmRsVersion?: string;
   runner?: CommitLLMBridgeRunner;
 }
 
@@ -79,18 +100,54 @@ function parseBridgeResponse(payload: string): CommitLLMBridgeResponse {
   return parsed;
 }
 
-function sha256HexFromBase64(value: string): string {
-  const buffer = Buffer.from(value, "base64");
-  return createHash("sha256").update(buffer).digest("hex");
+function createBridgeExecutionReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("commitllm_bridge_timeout")) {
+    return "commitllm_bridge_timeout";
+  }
+  if (message.includes("commitllm_bridge_stdout_limit_exceeded")) {
+    return "commitllm_bridge_stdout_limit_exceeded";
+  }
+  if (message.includes("ENOENT")) {
+    return "commitllm_bridge_runner_not_found";
+  }
+  return "commitllm_bridge_execution_failed";
 }
 
 export async function runCommitLLMBridgeWithUv(
   request: CommitLLMBridgeRequest,
   options: CommitLLMBridgeRuntimeOptions
 ): Promise<CommitLLMBridgeResponse> {
+  // Why: apply deterministic input bounds before spawning python to prevent oversized payload abuse.
+  const estimatedAuditBinaryBytes = Math.floor((request.audit_binary_base64.length * 3) / 4);
+  if (estimatedAuditBinaryBytes > options.maxAuditBinaryBytes) {
+    return {
+      ok: false,
+      error: "audit_binary_too_large",
+      error_detail: `estimated=${estimatedAuditBinaryBytes}, limit=${options.maxAuditBinaryBytes}`
+    };
+  }
+
+  const verifierKeyBytes = Buffer.byteLength(request.verifier_key_json, "utf8");
+  if (verifierKeyBytes > options.maxVerifierKeyJsonBytes) {
+    return {
+      ok: false,
+      error: "verifier_key_json_too_large",
+      error_detail: `size=${verifierKeyBytes}, limit=${options.maxVerifierKeyJsonBytes}`
+    };
+  }
+
   return new Promise<CommitLLMBridgeResponse>((resolve, reject) => {
     const child = spawn("uv", ["run", options.scriptPath], {
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        AGENT_CAPTCHA_BRIDGE_PROTOCOL_VERSION: BRIDGE_PROTOCOL_VERSION,
+        AGENT_CAPTCHA_BRIDGE_MAX_AUDIT_BINARY_BYTES: String(options.maxAuditBinaryBytes),
+        AGENT_CAPTCHA_BRIDGE_MAX_VERIFIER_KEY_JSON_BYTES: String(options.maxVerifierKeyJsonBytes),
+        AGENT_CAPTCHA_BRIDGE_CPU_SECONDS: String(options.bridgeCpuLimitSeconds),
+        AGENT_CAPTCHA_BRIDGE_MAX_MEMORY_BYTES: String(options.bridgeMemoryLimitBytes)
+      }
     });
 
     let stdout = "";
@@ -107,6 +164,12 @@ export async function runCommitLLMBridgeWithUv(
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
+      if (!settled && Buffer.byteLength(stdout, "utf8") > options.stdoutMaxBytes) {
+        settled = true;
+        clearTimeout(timeoutHandle);
+        child.kill("SIGKILL");
+        reject(new Error("commitllm_bridge_stdout_limit_exceeded"));
+      }
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
@@ -130,6 +193,15 @@ export async function runCommitLLMBridgeWithUv(
       clearTimeout(timeoutHandle);
 
       if (code !== 0) {
+        if (stdout.trim()) {
+          try {
+            resolve(parseBridgeResponse(stdout));
+            return;
+          } catch {
+            // Why: preserve deterministic non-JSON exit failure if bridge crashed before writing payload.
+          }
+        }
+
         reject(new Error(`commitllm_bridge_exit_${code ?? -1}: ${stderr.trim()}`));
         return;
       }
@@ -148,17 +220,41 @@ export async function runCommitLLMBridgeWithUv(
 export class CommitLLMBinaryReceiptVerifier implements CommitReceiptVerifier {
   private readonly bridgeScriptPath: string;
   private readonly timeoutMs: number;
+  private readonly stdoutMaxBytes: number;
+  private readonly maxAuditBinaryBytes: number;
+  private readonly maxVerifierKeyJsonBytes: number;
+  private readonly bridgeCpuLimitSeconds: number;
+  private readonly bridgeMemoryLimitBytes: number;
+  private readonly expectedBridgeProtocolVersion: string;
+  private readonly expectedVerilmRsVersion: string | undefined;
   private readonly runner: CommitLLMBridgeRunner;
 
   public constructor(config?: CommitLLMBinaryReceiptVerifierConfig) {
     this.bridgeScriptPath = config?.bridgeScriptPath ?? path.resolve(process.cwd(), "scripts/commitllm_verify_bridge.py");
     this.timeoutMs = config?.timeoutMs ?? 30_000;
+    this.stdoutMaxBytes = config?.stdoutMaxBytes ?? 1_000_000;
+    this.maxAuditBinaryBytes = config?.maxAuditBinaryBytes ?? 10_000_000;
+    this.maxVerifierKeyJsonBytes = config?.maxVerifierKeyJsonBytes ?? 250_000;
+    this.bridgeCpuLimitSeconds = config?.bridgeCpuLimitSeconds ?? 2;
+    this.bridgeMemoryLimitBytes = config?.bridgeMemoryLimitBytes ?? 512_000_000;
+    this.expectedBridgeProtocolVersion = config?.expectedBridgeProtocolVersion ?? BRIDGE_PROTOCOL_VERSION;
+    this.expectedVerilmRsVersion = config?.expectedVerilmRsVersion;
     this.runner = config?.runner ?? runCommitLLMBridgeWithUv;
   }
 
   public async verifyReceipt(
     receipt: CommitLLMReceipt,
-    expected: { challengeId: string; outputHash: string; commitHash: string; agentId: string; answer: string }
+    expected: {
+      challengeId: string;
+      outputHash: string;
+      commitHash: string;
+      bindingHash: string;
+      bindingVersion: typeof COMMITLLM_BINDING_VERSION;
+      auditBinarySha256: string;
+      verifierKeySha256: string;
+      agentId: string;
+      answer: string;
+    }
   ): Promise<{ valid: boolean; reason?: string }> {
     if (receipt.challengeId !== expected.challengeId) {
       return { valid: false, reason: "receipt_challenge_mismatch" };
@@ -172,6 +268,42 @@ export class CommitLLMBinaryReceiptVerifier implements CommitReceiptVerifier {
       return { valid: false, reason: "receipt_commit_hash_mismatch" };
     }
 
+    if (receipt.bindingVersion !== expected.bindingVersion) {
+      return { valid: false, reason: "receipt_binding_version_invalid" };
+    }
+
+    if (receipt.bindingHash !== expected.bindingHash) {
+      return { valid: false, reason: "receipt_binding_hash_mismatch" };
+    }
+
+    let computedAuditBinarySha256: string;
+    let computedVerifierKeySha256: string;
+    try {
+      computedAuditBinarySha256 = computeAuditBinarySha256(receipt.artifacts.auditBinaryBase64);
+      computedVerifierKeySha256 = computeVerifierKeySha256(receipt.artifacts.verifierKeyJson);
+    } catch (error) {
+      return {
+        valid: false,
+        reason: error instanceof Error ? error.message : "receipt_artifact_digest_error"
+      };
+    }
+
+    if (computedAuditBinarySha256 !== expected.auditBinarySha256) {
+      return { valid: false, reason: "receipt_audit_binary_sha256_mismatch" };
+    }
+
+    if (computedVerifierKeySha256 !== expected.verifierKeySha256) {
+      return { valid: false, reason: "receipt_verifier_key_sha256_mismatch" };
+    }
+
+    if (receipt.artifacts.auditBinarySha256 && receipt.artifacts.auditBinarySha256 !== expected.auditBinarySha256) {
+      return { valid: false, reason: "receipt_artifact_audit_sha256_mismatch" };
+    }
+
+    if (receipt.artifacts.verifierKeySha256 && receipt.artifacts.verifierKeySha256 !== expected.verifierKeySha256) {
+      return { valid: false, reason: "receipt_artifact_verifier_key_sha256_mismatch" };
+    }
+
     const request: CommitLLMBridgeRequest = {
       audit_binary_base64: receipt.artifacts.auditBinaryBase64,
       verifier_key_json: receipt.artifacts.verifierKeyJson,
@@ -182,7 +314,12 @@ export class CommitLLMBinaryReceiptVerifier implements CommitReceiptVerifier {
     try {
       bridgeResult = await this.runner(request, {
         scriptPath: this.bridgeScriptPath,
-        timeoutMs: this.timeoutMs
+        timeoutMs: this.timeoutMs,
+        stdoutMaxBytes: this.stdoutMaxBytes,
+        maxAuditBinaryBytes: this.maxAuditBinaryBytes,
+        maxVerifierKeyJsonBytes: this.maxVerifierKeyJsonBytes,
+        bridgeCpuLimitSeconds: this.bridgeCpuLimitSeconds,
+        bridgeMemoryLimitBytes: this.bridgeMemoryLimitBytes
       });
     } catch (error) {
       logger.warn(
@@ -194,7 +331,7 @@ export class CommitLLMBinaryReceiptVerifier implements CommitReceiptVerifier {
         },
         "CommitLLM bridge execution failed"
       );
-      return { valid: false, reason: "commitllm_bridge_execution_failed" };
+      return { valid: false, reason: createBridgeExecutionReason(error) };
     }
 
     if (!bridgeResult.ok) {
@@ -209,9 +346,20 @@ export class CommitLLMBinaryReceiptVerifier implements CommitReceiptVerifier {
       return { valid: false, reason: "commitllm_empty_report" };
     }
 
-    const expectedSha = receipt.artifacts.auditBinarySha256 ?? sha256HexFromBase64(receipt.artifacts.auditBinaryBase64);
-    if (bridgeResult.audit_binary_sha256 !== expectedSha) {
+    if (bridgeResult.bridge_protocol_version !== this.expectedBridgeProtocolVersion) {
+      return { valid: false, reason: "commitllm_bridge_protocol_version_mismatch" };
+    }
+
+    if (this.expectedVerilmRsVersion && bridgeResult.verilm_rs_version !== this.expectedVerilmRsVersion) {
+      return { valid: false, reason: "commitllm_verilm_rs_version_mismatch" };
+    }
+
+    if (bridgeResult.audit_binary_sha256 !== expected.auditBinarySha256) {
       return { valid: false, reason: "commitllm_audit_binary_sha256_mismatch" };
+    }
+
+    if (bridgeResult.verifier_key_sha256 !== expected.verifierKeySha256) {
+      return { valid: false, reason: "commitllm_verifier_key_sha256_mismatch" };
     }
 
     return { valid: true };

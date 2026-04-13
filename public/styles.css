@@ -66,6 +66,12 @@ h2 {
   margin-bottom: 0.45rem;
 }
 
+h3 {
+  margin: 0.85rem 0 0.4rem;
+  color: #0b4b46;
+  font-size: 0.96rem;
+}
+
 .lead {
   margin: 0 0 0.9rem;
   color: var(--muted);

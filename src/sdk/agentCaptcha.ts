@@ -29,7 +29,10 @@ export interface CommitLLMArtifacts {
   verifierKeyJson: string;
   verifierKeyId?: string;
   auditBinarySha256?: string;
+  verifierKeySha256?: string;
 }
+
+export const COMMITLLM_BINDING_VERSION = "agent-captcha-binding-v1" as const;
 
 export interface CommitLLMReceipt {
   challengeId: string;
@@ -40,6 +43,8 @@ export interface CommitLLMReceipt {
   outputHash: string;
   commitHash: string;
   issuedAt: string;
+  bindingVersion: typeof COMMITLLM_BINDING_VERSION;
+  bindingHash: string;
   artifacts: CommitLLMArtifacts;
 }
 
@@ -68,7 +73,17 @@ export interface AgentSigner {
 export interface CommitReceiptVerifier {
   verifyReceipt(
     receipt: CommitLLMReceipt,
-    expected: { challengeId: string; outputHash: string; commitHash: string; agentId: string; answer: string }
+    expected: {
+      challengeId: string;
+      outputHash: string;
+      commitHash: string;
+      bindingHash: string;
+      bindingVersion: typeof COMMITLLM_BINDING_VERSION;
+      auditBinarySha256: string;
+      verifierKeySha256: string;
+      agentId: string;
+      answer: string;
+    }
   ): Promise<{ valid: boolean; reason?: string }>;
 }
 
@@ -83,17 +98,6 @@ export function computeChallengeAnswer(challenge: AgentChallenge, agentId: strin
 
 export function computeOutputHash(modelOutput: string): string {
   return sha256Hex(modelOutput);
-}
-
-export function computeCommitHash(
-  challengeId: string,
-  answer: string,
-  modelOutputHash: string,
-  model: string,
-  auditMode: AuditMode
-): string {
-  const material = `${challengeId}|${answer}|${modelOutputHash}|${model}|${auditMode}`;
-  return sha256Hex(material);
 }
 
 function stableStringify(value: unknown): string {
@@ -113,6 +117,115 @@ function stableStringify(value: unknown): string {
     .join(",");
 
   return `{${serialized}}`;
+}
+
+function decodeBase64Strict(value: string): Uint8Array {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    throw new Error("receipt_audit_binary_base64_invalid");
+  }
+
+  const decoded = Buffer.from(normalized, "base64");
+  const roundTrip = decoded.toString("base64");
+  if (roundTrip.replace(/=+$/g, "") !== normalized.replace(/=+$/g, "")) {
+    throw new Error("receipt_audit_binary_base64_invalid");
+  }
+
+  return decoded;
+}
+
+function canonicalizeJsonString(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return stableStringify(parsed);
+  } catch {
+    throw new Error("receipt_verifier_key_json_invalid");
+  }
+}
+
+export function computeAuditBinarySha256(auditBinaryBase64: string): string {
+  return bytesToHex(sha256(decodeBase64Strict(auditBinaryBase64)));
+}
+
+export function computeVerifierKeySha256(verifierKeyJson: string): string {
+  const canonical = canonicalizeJsonString(verifierKeyJson);
+  return sha256Hex(canonical);
+}
+
+export interface CommitLLMBindingMaterial {
+  version: typeof COMMITLLM_BINDING_VERSION;
+  challengeId: string;
+  answer: string;
+  modelOutputHash: string;
+  receiptOutputHash: string;
+  provider: string;
+  model: string;
+  modelVersion: string | null;
+  auditMode: AuditMode;
+  commitHash: string;
+  receiptIssuedAt: string;
+  artifact: {
+    auditBinarySha256: string;
+    verifierKeySha256: string;
+    verifierKeyId: string | null;
+  };
+}
+
+export function buildCommitLLMBindingMaterial(input: {
+  challengeId: string;
+  answer: string;
+  modelOutputHash: string;
+  receipt: CommitLLMReceipt;
+  auditBinarySha256: string;
+  verifierKeySha256: string;
+}): CommitLLMBindingMaterial {
+  return {
+    version: COMMITLLM_BINDING_VERSION,
+    challengeId: input.challengeId,
+    answer: input.answer,
+    modelOutputHash: input.modelOutputHash,
+    receiptOutputHash: input.receipt.outputHash,
+    provider: input.receipt.provider,
+    model: input.receipt.model,
+    modelVersion: input.receipt.modelVersion ?? null,
+    auditMode: input.receipt.auditMode,
+    commitHash: input.receipt.commitHash,
+    receiptIssuedAt: input.receipt.issuedAt,
+    artifact: {
+      auditBinarySha256: input.auditBinarySha256,
+      verifierKeySha256: input.verifierKeySha256,
+      verifierKeyId: input.receipt.artifacts.verifierKeyId ?? null
+    }
+  };
+}
+
+export function computeCommitLLMBindingHash(input: {
+  challengeId: string;
+  answer: string;
+  modelOutputHash: string;
+  receipt: CommitLLMReceipt;
+  auditBinarySha256: string;
+  verifierKeySha256: string;
+}): string {
+  const material = buildCommitLLMBindingMaterial(input);
+  return sha256Hex(stableStringify(material));
+}
+
+function deriveArtifactHashes(receipt: CommitLLMReceipt): { auditBinarySha256: string; verifierKeySha256: string } {
+  const computedAuditBinarySha256 = computeAuditBinarySha256(receipt.artifacts.auditBinaryBase64);
+  if (receipt.artifacts.auditBinarySha256 && receipt.artifacts.auditBinarySha256 !== computedAuditBinarySha256) {
+    throw new Error("receipt_artifact_audit_sha256_mismatch");
+  }
+
+  const computedVerifierKeySha256 = computeVerifierKeySha256(receipt.artifacts.verifierKeyJson);
+  if (receipt.artifacts.verifierKeySha256 && receipt.artifacts.verifierKeySha256 !== computedVerifierKeySha256) {
+    throw new Error("receipt_artifact_verifier_key_sha256_mismatch");
+  }
+
+  return {
+    auditBinarySha256: computedAuditBinarySha256,
+    verifierKeySha256: computedVerifierKeySha256
+  };
 }
 
 function serializePayload(payload: AgentProofPayload): Uint8Array {
@@ -190,22 +303,41 @@ export async function verifyAgentProof(input: {
     return { valid: false, reason: "model_output_hash_mismatch" };
   }
 
-  const commitHash = computeCommitHash(
-    payload.challengeId,
-    payload.answer,
-    payload.modelOutputHash,
-    payload.commitReceipt.model,
-    payload.commitReceipt.auditMode
-  );
+  if (payload.commitReceipt.bindingVersion !== COMMITLLM_BINDING_VERSION) {
+    return { valid: false, reason: "receipt_binding_version_invalid" };
+  }
 
-  if (payload.commitReceipt.commitHash !== commitHash) {
-    return { valid: false, reason: "commit_hash_mismatch" };
+  let artifactHashes: { auditBinarySha256: string; verifierKeySha256: string };
+  let bindingHash: string;
+  try {
+    artifactHashes = deriveArtifactHashes(payload.commitReceipt);
+    bindingHash = computeCommitLLMBindingHash({
+      challengeId: payload.challengeId,
+      answer: payload.answer,
+      modelOutputHash: payload.modelOutputHash,
+      receipt: payload.commitReceipt,
+      auditBinarySha256: artifactHashes.auditBinarySha256,
+      verifierKeySha256: artifactHashes.verifierKeySha256
+    });
+  } catch (error) {
+    return {
+      valid: false,
+      reason: error instanceof Error ? error.message : "receipt_binding_invalid"
+    };
+  }
+
+  if (payload.commitReceipt.bindingHash !== bindingHash) {
+    return { valid: false, reason: "receipt_binding_hash_mismatch" };
   }
 
   const receiptResult = await input.verifier.verifyReceipt(payload.commitReceipt, {
     challengeId: payload.challengeId,
     outputHash: payload.modelOutputHash,
-    commitHash,
+    commitHash: payload.commitReceipt.commitHash,
+    bindingHash,
+    bindingVersion: COMMITLLM_BINDING_VERSION,
+    auditBinarySha256: artifactHashes.auditBinarySha256,
+    verifierKeySha256: artifactHashes.verifierKeySha256,
     agentId: payload.agentId,
     answer: payload.answer
   });

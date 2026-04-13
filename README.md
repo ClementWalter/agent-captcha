@@ -11,21 +11,26 @@ This repository implements an **agent-captcha** prototype with real CommitLLM ve
 
 1. `src/sdk/agentCaptcha.ts`
    - challenge answer derivation,
-   - output hash and commit hash computation,
+   - output hash + canonical binding-hash computation (`agent-captcha-binding-v1`),
    - signed proof creation,
    - proof verification pipeline.
 
 2. `src/server/commitllmVerifier.ts` + `scripts/commitllm_verify_bridge.py`
    - bridge from Node to Python with `uv run`,
    - CommitLLM audit-binary verification via `verilm_rs.verify_v4_binary`,
-   - binding checks for challenge ID, output hash, commit hash, model metadata.
+   - binding checks for challenge ID, output hash, provider commit hash, model metadata, and artifact digests,
+   - strict bridge limits (timeout, max payload sizes, CPU/memory caps, stdout cap),
+   - protocol/version trust-chain checks.
 
 3. `src/server/app.ts`
    - challenge issuance,
    - proof verification and short-lived token issuance,
    - token-gated message posting,
+   - versioned verification endpoint `POST /api/v2/agent-captcha/verify`,
+   - compatibility alias `POST /api/agent-captcha/verify`,
    - runbook endpoint at `GET /api/agent-captcha/runbook`,
-   - deprecated `POST /api/agent-captcha/receipt` returns `410`.
+   - migration telemetry endpoint at `GET /api/agent-captcha/migration-status`,
+   - deprecated `POST /api/agent-captcha/receipt` returns `410` with migration metadata.
 
 4. `public/`
    - strict read-only thread viewer (GET polling + manual refresh only),
@@ -39,6 +44,9 @@ This repository implements an **agent-captcha** prototype with real CommitLLM ve
    - endpoint order,
    - required request fields,
    - expected response keys,
+   - canonicalization + hash-binding contract,
+   - migration/cutover strategy and telemetry,
+   - bridge operational constraints/trust chain,
    - failure codes.
 
 ## Quick start
@@ -65,6 +73,7 @@ Set CommitLLM artifacts, then run:
 ```bash
 export AGENT_CAPTCHA_COMMITLLM_AUDIT_BINARY_BASE64="<base64 audit binary>"
 export AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_JSON='{"...":"..."}'
+export AGENT_CAPTCHA_COMMITLLM_COMMIT_HASH="<provider commit hash>"
 npm run demo:agent
 ```
 
@@ -72,6 +81,7 @@ Optional env vars:
 
 - `AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_ID`
 - `AGENT_CAPTCHA_COMMITLLM_AUDIT_BINARY_SHA256`
+- `AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_SHA256`
 - `AGENT_CAPTCHA_MODEL`
 - `AGENT_CAPTCHA_MODEL_VERSION`
 - `AGENT_CAPTCHA_PROVIDER`
@@ -94,6 +104,7 @@ npm test
 
 ## Notes
 
-- `POST /api/agent-captcha/receipt` was intentionally removed from verification flow and now returns `410`.
-- Production verification path is audit binary + `verify_v4_binary`, not digest-only checks.
+- `POST /api/agent-captcha/receipt` is deprecated and returns `410` with migration metadata and sunset telemetry.
+- Canonical verification path is `POST /api/v2/agent-captcha/verify`; `/api/agent-captcha/verify` remains a migration alias.
+- Production verification path is audit binary + `verify_v4_binary` plus canonical binding digest checks, not synthetic digest-only checks.
 - Current storage is in-memory and resets on restart.

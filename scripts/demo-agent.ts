@@ -1,15 +1,18 @@
 /**
  * Demo agent client.
  * Why: provide a reproducible flow that sends real CommitLLM artifacts into
- * `/api/agent-captcha/verify` instead of using the removed MVP mock receipt path.
+ * `/api/v2/agent-captcha/verify` instead of using the removed MVP mock receipt path.
  */
 import pino from "pino";
 import {
   type AgentChallenge,
+  COMMITLLM_BINDING_VERSION,
+  computeAuditBinarySha256,
   createAgentProof,
   computeChallengeAnswer,
-  computeCommitHash,
+  computeCommitLLMBindingHash,
   computeOutputHash,
+  computeVerifierKeySha256,
   type CommitLLMReceipt,
   type AuditMode
 } from "../src/sdk";
@@ -73,17 +76,13 @@ async function run(): Promise<void> {
 
   const auditBinaryBase64 = requireEnv("AGENT_CAPTCHA_COMMITLLM_AUDIT_BINARY_BASE64");
   const verifierKeyJson = requireEnv("AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_JSON");
+  const commitHash = requireEnv("AGENT_CAPTCHA_COMMITLLM_COMMIT_HASH");
   const verifierKeyId = process.env.AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_ID;
-  const auditBinarySha256 = process.env.AGENT_CAPTCHA_COMMITLLM_AUDIT_BINARY_SHA256;
+  const resolvedAuditBinarySha256 = process.env.AGENT_CAPTCHA_COMMITLLM_AUDIT_BINARY_SHA256 ?? computeAuditBinarySha256(auditBinaryBase64);
+  const resolvedVerifierKeySha256 =
+    process.env.AGENT_CAPTCHA_COMMITLLM_VERIFIER_KEY_SHA256 ?? computeVerifierKeySha256(verifierKeyJson);
 
   const modelOutputHash = computeOutputHash(modelOutput);
-  const commitHash = computeCommitHash(
-    challengeResponse.challenge.challengeId,
-    answer,
-    modelOutputHash,
-    model,
-    auditMode
-  );
 
   const commitReceipt: CommitLLMReceipt = {
     challengeId: challengeResponse.challenge.challengeId,
@@ -94,13 +93,25 @@ async function run(): Promise<void> {
     outputHash: modelOutputHash,
     commitHash,
     issuedAt: new Date().toISOString(),
+    bindingVersion: COMMITLLM_BINDING_VERSION,
+    bindingHash: "",
     artifacts: {
       auditBinaryBase64,
       verifierKeyJson,
       ...(verifierKeyId ? { verifierKeyId } : {}),
-      ...(auditBinarySha256 ? { auditBinarySha256 } : {})
+      auditBinarySha256: resolvedAuditBinarySha256,
+      verifierKeySha256: resolvedVerifierKeySha256
     }
   };
+
+  commitReceipt.bindingHash = computeCommitLLMBindingHash({
+    challengeId: challengeResponse.challenge.challengeId,
+    answer,
+    modelOutputHash,
+    receipt: commitReceipt,
+    auditBinarySha256: resolvedAuditBinarySha256,
+    verifierKeySha256: resolvedVerifierKeySha256
+  });
 
   const proof = await createAgentProof({
     challenge: challengeResponse.challenge,
@@ -112,7 +123,7 @@ async function run(): Promise<void> {
   });
 
   const verificationResponse = await postJson<{ accessToken: string; expiresAt: string }>(
-    `${baseUrl}/api/agent-captcha/verify`,
+    `${baseUrl}/api/v2/agent-captcha/verify`,
     {
       agentId: demoSigner.agentId,
       proof

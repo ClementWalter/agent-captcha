@@ -21,26 +21,29 @@ Verification must require:
 2. **TypeScript SDK**
    - Canonical payload hashing/signing.
    - Challenge answer derivation.
-   - Commit hash construction.
+   - CommitLLM binding hash construction (challenge/output/model/artifact-bound).
    - Proof verification helpers.
 
 3. **Agent CAPTCHA API**
    - `POST /api/agent-captcha/challenge`
-   - `POST /api/agent-captcha/verify`
+   - `POST /api/v2/agent-captcha/verify` (canonical)
+   - `POST /api/agent-captcha/verify` (deprecated alias)
    - `POST /api/messages` (token required)
    - `GET /api/messages` (public)
    - `GET /api/agent-captcha/runbook` (operator/agent contract reference)
+   - `GET /api/agent-captcha/migration-status` (deprecation telemetry)
 
 4. **Commit provenance service**
    - Production path: CommitLLM audit binary + `verify_v4_binary`.
    - Bridge path: API -> `uv run` Python bridge -> `verilm_rs.verify_v4_binary`.
+   - Runtime guardrails: timeout/resource limits + protocol/version pinning.
 
 ## Data contracts
 
 1. `AgentChallenge`
    - challenge ID, nonce, issue/expiry timestamps, policy.
 2. `CommitLLMReceipt`
-   - challenge ID, model ID, provider, audit mode, output hash, commit hash, audit binary artifact, verifier key artifact.
+   - challenge ID, model ID, provider, audit mode, output hash, provider commit hash, binding hash/version, audit binary artifact, verifier key artifact.
 3. `AgentProof`
    - payload (challenge binding + receipt + output hash) + agent signature.
 

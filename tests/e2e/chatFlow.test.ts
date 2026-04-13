@@ -6,14 +6,16 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../../src/server/app";
 import {
+  COMMITLLM_BINDING_VERSION,
   createAgentProof,
   computeChallengeAnswer,
-  computeCommitHash,
+  computeCommitLLMBindingHash,
   computeOutputHash,
   type AgentChallenge,
   type CommitLLMReceipt
 } from "../../src/sdk";
 import { CommitLLMBinaryReceiptVerifier } from "../../src/server/commitllmVerifier";
+import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
 
 const demoSigner = {
   agentId: "demo-agent-001",
@@ -22,10 +24,14 @@ const demoSigner = {
 };
 
 function createPassingVerifier() {
+  const fixture = loadCommitLLMFixture();
   return new CommitLLMBinaryReceiptVerifier({
     runner: async () => ({
       ok: true,
-      audit_binary_sha256: "3df12b1aaa868d4278b195cd3d7d856406d83ff673eb7fad3d19469ab2a64217",
+      bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
+      verilm_rs_version: "fixture",
+      audit_binary_sha256: fixture.auditBinarySha256,
+      verifier_key_sha256: fixture.verifierKeySha256,
       report: {
         passed: true,
         checks_run: 7,
@@ -40,22 +46,37 @@ function createPassingVerifier() {
 }
 
 function buildReceipt(challenge: AgentChallenge, modelOutputHash: string): CommitLLMReceipt {
+  const fixture = loadCommitLLMFixture();
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
 
-  return {
+  const receipt: CommitLLMReceipt = {
     challengeId: challenge.challengeId,
     model: "llama-3.1-8b-w8a8",
     provider: "commitllm",
     auditMode: "routine",
     outputHash: modelOutputHash,
-    commitHash: computeCommitHash(challenge.challengeId, answer, modelOutputHash, "llama-3.1-8b-w8a8", "routine"),
+    commitHash: fixture.commitHash,
     issuedAt: new Date().toISOString(),
+    bindingVersion: COMMITLLM_BINDING_VERSION,
+    bindingHash: "",
     artifacts: {
-      auditBinaryBase64: Buffer.from("audit-binary").toString("base64"),
-      verifierKeyJson: JSON.stringify({ key_id: "demo-key" }),
-      auditBinarySha256: "3df12b1aaa868d4278b195cd3d7d856406d83ff673eb7fad3d19469ab2a64217"
+      auditBinaryBase64: fixture.auditBinaryBase64,
+      verifierKeyJson: fixture.verifierKeyJson,
+      auditBinarySha256: fixture.auditBinarySha256,
+      verifierKeySha256: fixture.verifierKeySha256
     }
   };
+
+  receipt.bindingHash = computeCommitLLMBindingHash({
+    challengeId: challenge.challengeId,
+    answer,
+    modelOutputHash,
+    receipt,
+    auditBinarySha256: fixture.auditBinarySha256,
+    verifierKeySha256: fixture.verifierKeySha256
+  });
+
+  return receipt;
 }
 
 async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt?: Partial<CommitLLMReceipt> }) {
@@ -75,6 +96,18 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
     }
   };
 
+  const bindingHashOverride = overrides?.receipt?.bindingHash;
+  mergedReceipt.bindingHash =
+    bindingHashOverride ??
+    computeCommitLLMBindingHash({
+      challengeId: challenge.challengeId,
+      answer,
+      modelOutputHash,
+      receipt: mergedReceipt,
+      auditBinarySha256: mergedReceipt.artifacts.auditBinarySha256 ?? loadCommitLLMFixture().auditBinarySha256,
+      verifierKeySha256: mergedReceipt.artifacts.verifierKeySha256 ?? loadCommitLLMFixture().verifierKeySha256
+    });
+
   const proof = await createAgentProof({
     challenge,
     signer: demoSigner,
@@ -89,7 +122,7 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
 
 async function authenticateAgent(api: ReturnType<typeof request>): Promise<string> {
   const { proof } = await issueProof(api);
-  const verificationResponse = await api.post("/api/agent-captcha/verify").send({
+  const verificationResponse = await api.post("/api/v2/agent-captcha/verify").send({
     agentId: demoSigner.agentId,
     proof
   });
@@ -128,7 +161,7 @@ describe("chat flow", () => {
       }
     });
 
-    const response = await api.post("/api/agent-captcha/verify").send({
+    const response = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
       proof
     });
@@ -136,15 +169,30 @@ describe("chat flow", () => {
     expect(response.body.error).toBe("receipt_output_hash_mismatch");
   });
 
-  it("rejects replayed challenge proofs", async () => {
-    const { proof } = await issueProof(api);
+  it("rejects explicit binding hash tampering", async () => {
+    const { proof } = await issueProof(api, {
+      receipt: {
+        bindingHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    });
 
-    await api.post("/api/agent-captcha/verify").send({
+    const response = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
       proof
     });
 
-    const replayResponse = await api.post("/api/agent-captcha/verify").send({
+    expect(response.body.error).toBe("receipt_binding_hash_mismatch");
+  });
+
+  it("rejects replayed challenge proofs", async () => {
+    const { proof } = await issueProof(api);
+
+    await api.post("/api/v2/agent-captcha/verify").send({
+      agentId: demoSigner.agentId,
+      proof
+    });
+
+    const replayResponse = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
       proof
     });
@@ -162,11 +210,32 @@ describe("chat flow", () => {
     const { proof } = await issueProof(expiringApi);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    const response = await expiringApi.post("/api/agent-captcha/verify").send({
+    const response = await expiringApi.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
       proof
     });
 
     expect(response.body.error).toBe("challenge_expired");
+  });
+
+  it("returns migration metadata on deprecated receipt endpoint", async () => {
+    const response = await api.post("/api/agent-captcha/receipt").send({});
+    expect(response.status).toBe(410);
+  });
+
+  it("tracks deprecated receipt endpoint telemetry", async () => {
+    await api.post("/api/agent-captcha/receipt").send({});
+    const statusResponse = await api.get("/api/agent-captcha/migration-status");
+    expect(statusResponse.body.telemetry.receiptDeprecatedCalls > 0).toBe(true);
+  });
+
+  it("tracks verify alias telemetry for compatibility monitoring", async () => {
+    const { proof } = await issueProof(api);
+    await api.post("/api/agent-captcha/verify").send({
+      agentId: demoSigner.agentId,
+      proof
+    });
+    const statusResponse = await api.get("/api/agent-captcha/migration-status");
+    expect(statusResponse.body.telemetry.verifyAliasCalls > 0).toBe(true);
   });
 });

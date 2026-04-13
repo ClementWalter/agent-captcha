@@ -1,0 +1,11 @@
+{
+  "curve": "bn254",
+  "protocol": "commitllm-v4",
+  "key_id": "fixture-key-2026-04",
+  "public_params": {
+    "alpha": "0x193d7f7f51c8a09b71",
+    "beta": "0x42a91cb7840f2ad8b3",
+    "gamma": "0x0f933ae271b4c1c19c",
+    "delta": "0x7f6d3d8a3e92f194fd"
+  }
+}

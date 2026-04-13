@@ -55,9 +55,26 @@ export interface AppConfig {
 interface AppState {
   challenges: Map<string, StoredChallenge>;
   messages: ChatMessage[];
+  migrationTelemetry: {
+    receiptDeprecatedCalls: number;
+    verifyAliasCalls: number;
+    verifyV2Calls: number;
+    lastReceiptDeprecatedAt: string | null;
+    lastVerifyAliasAt: string | null;
+    lastVerifyV2At: string | null;
+  };
 }
 
 const hex64Regex = /^[a-f0-9]{64}$/;
+const VERIFY_V2_PATH = "/api/v2/agent-captcha/verify";
+const VERIFY_ALIAS_PATH = "/api/agent-captcha/verify";
+const RECEIPT_DEPRECATION_STARTED_AT = "2026-04-13T00:00:00.000Z";
+const RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT = "2026-07-31T00:00:00.000Z";
+const MIGRATION_CUTOVER_CRITERIA = [
+  "deprecated receipt endpoint traffic stays at 0 for 14 consecutive days",
+  "verify alias traffic (/api/agent-captcha/verify) stays at 0 for 14 consecutive days",
+  "versioned verify path (/api/v2/agent-captcha/verify) has successful production traffic"
+] as const;
 
 const challengeRequestSchema = z.object({
   agentId: z.string().min(3).max(120)
@@ -82,11 +99,14 @@ const verifyRequestSchema = z.object({
         outputHash: z.string().regex(hex64Regex),
         commitHash: z.string().regex(hex64Regex),
         issuedAt: z.string(),
+        bindingVersion: z.literal("agent-captcha-binding-v1"),
+        bindingHash: z.string().regex(hex64Regex),
         artifacts: z.object({
           auditBinaryBase64: z.string().min(1),
           verifierKeyJson: z.string().min(2),
           verifierKeyId: z.string().min(1).max(200).optional(),
-          auditBinarySha256: z.string().regex(hex64Regex).optional()
+          auditBinarySha256: z.string().regex(hex64Regex).optional(),
+          verifierKeySha256: z.string().regex(hex64Regex).optional()
         })
       }),
       createdAt: z.string()
@@ -170,7 +190,15 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   const app = express();
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
-    messages: []
+    messages: [],
+    migrationTelemetry: {
+      receiptDeprecatedCalls: 0,
+      verifyAliasCalls: 0,
+      verifyV2Calls: 0,
+      lastReceiptDeprecatedAt: null,
+      lastVerifyAliasAt: null,
+      lastVerifyV2At: null
+    }
   };
   const agentMap = new Map(config.registeredAgents.map((entry) => [entry.agentId, entry]));
   const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMBinaryReceiptVerifier();
@@ -196,7 +224,8 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
         },
         verify: {
           method: "POST",
-          path: "/api/agent-captcha/verify",
+          path: VERIFY_V2_PATH,
+          legacyAlias: VERIFY_ALIAS_PATH,
           requiredHeaders: ["content-type: application/json"],
           requiredBodyKeys: [
             "agentId",
@@ -210,6 +239,8 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
             "proof.payload.commitReceipt.auditMode",
             "proof.payload.commitReceipt.outputHash",
             "proof.payload.commitReceipt.commitHash",
+            "proof.payload.commitReceipt.bindingVersion",
+            "proof.payload.commitReceipt.bindingHash",
             "proof.payload.commitReceipt.artifacts.auditBinaryBase64",
             "proof.payload.commitReceipt.artifacts.verifierKeyJson",
             "proof.signature"
@@ -224,10 +255,50 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
           responseKeys: ["message.id", "message.parentId", "message.content", "message.authorAgentId", "message.createdAt"]
         }
       },
+      uiContract: {
+        threadView: {
+          method: "GET",
+          path: "/api/messages",
+          notes: "Human UI is read-only and must not call POST /api/messages directly."
+        },
+        postingFlow: {
+          requiredHeaders: {
+            challenge: ["content-type: application/json"],
+            verify: ["content-type: application/json"],
+            postMessage: ["authorization: Bearer <accessToken>", "content-type: application/json"]
+          },
+          expectedFailures: {
+            challenge: ["invalid_challenge_request", "unknown_agent"],
+            verify: [
+              "invalid_verify_request",
+              "unknown_challenge",
+              "challenge_already_used",
+              "challenge_expired",
+              "receipt_binding_hash_mismatch",
+              "commitllm_verify_v4_failed"
+            ],
+            postMessage: ["missing_access_token", "invalid_access_token", "invalid_message", "unknown_parent"]
+          },
+          acceptanceCriteria: [
+            "read-only UI only uses GET /api/messages and GET /api/agent-captcha/runbook",
+            "agent posting uses challenge -> verify(v2) -> post sequence",
+            "verification failures map to stable machine-readable error codes"
+          ]
+        }
+      },
+      migration: {
+        receiptEndpoint: "/api/agent-captcha/receipt",
+        deprecationStartedAt: RECEIPT_DEPRECATION_STARTED_AT,
+        compatibilityWindowEndsAt: RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT,
+        verifyCanonicalPath: VERIFY_V2_PATH,
+        verifyAliasPath: VERIFY_ALIAS_PATH,
+        telemetryPath: "/api/agent-captcha/migration-status",
+        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA
+      },
       deprecated: {
         path: "/api/agent-captcha/receipt",
         status: 410,
-        replacement: "send real CommitLLM artifacts in /api/agent-captcha/verify payload.commitReceipt"
+        replacement: "send real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt"
       },
       failureCodes: [
         "invalid_challenge_request",
@@ -241,14 +312,31 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
         "invalid_verify_request",
         "model_not_allowed",
         "audit_mode_not_allowed",
-        "commit_hash_mismatch",
         "receipt_challenge_mismatch",
         "receipt_output_hash_mismatch",
         "receipt_commit_hash_mismatch",
+        "receipt_binding_version_invalid",
+        "receipt_binding_hash_mismatch",
+        "receipt_audit_binary_base64_invalid",
+        "receipt_verifier_key_json_invalid",
+        "receipt_artifact_audit_sha256_mismatch",
+        "receipt_artifact_verifier_key_sha256_mismatch",
+        "receipt_audit_binary_sha256_mismatch",
+        "receipt_verifier_key_sha256_mismatch",
         "commitllm_bridge_execution_failed",
+        "commitllm_bridge_timeout",
+        "commitllm_bridge_stdout_limit_exceeded",
+        "commitllm_bridge_runner_not_found",
         "commitllm_bridge_error",
         "commitllm_verify_v4_failed",
         "commitllm_audit_binary_sha256_mismatch",
+        "commitllm_verifier_key_sha256_mismatch",
+        "commitllm_bridge_protocol_version_mismatch",
+        "commitllm_verilm_rs_version_mismatch",
+        "commitllm_audit_binary_too_large",
+        "commitllm_verifier_key_json_too_large",
+        "commitllm_invalid_audit_binary_base64",
+        "commitllm_invalid_verifier_key_json",
         "commitllm_verilm_rs_not_installed",
         "commitllm_verify_v4_binary_failed",
         "invalid_agent_signature",
@@ -256,6 +344,29 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
         "invalid_access_token",
         "invalid_message",
         "unknown_parent"
+      ]
+    });
+  });
+
+  app.get("/api/agent-captcha/migration-status", (_req, res) => {
+    const telemetry = state.migrationTelemetry;
+    res.json({
+      deprecationStartedAt: RECEIPT_DEPRECATION_STARTED_AT,
+      compatibilityWindowEndsAt: RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT,
+      telemetry,
+      cutoverCriteria: [
+        {
+          name: MIGRATION_CUTOVER_CRITERIA[0],
+          satisfied: telemetry.receiptDeprecatedCalls === 0
+        },
+        {
+          name: MIGRATION_CUTOVER_CRITERIA[1],
+          satisfied: telemetry.verifyAliasCalls === 0
+        },
+        {
+          name: MIGRATION_CUTOVER_CRITERIA[2],
+          satisfied: telemetry.verifyV2Calls > 0
+        }
       ]
     });
   });
@@ -290,39 +401,69 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   });
 
   app.post("/api/agent-captcha/receipt", (_req, res) => {
+    state.migrationTelemetry.receiptDeprecatedCalls += 1;
+    state.migrationTelemetry.lastReceiptDeprecatedAt = new Date().toISOString();
+    res.setHeader("deprecation", "true");
+    res.setHeader("sunset", new Date(RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT).toUTCString());
+    res.setHeader("link", `<${VERIFY_V2_PATH}>; rel="successor-version"`);
+
     return res.status(410).json({
       error: "receipt_endpoint_deprecated",
-      message: "MVP synthetic receipts were removed. Provide real CommitLLM artifacts in /api/agent-captcha/verify payload.commitReceipt."
+      message: "MVP synthetic receipts were removed. Provide real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt.",
+      migration: {
+        telemetryPath: "/api/agent-captcha/migration-status",
+        deprecationStartedAt: RECEIPT_DEPRECATION_STARTED_AT,
+        compatibilityWindowEndsAt: RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT,
+        verifyCanonicalPath: VERIFY_V2_PATH,
+        verifyAliasPath: VERIFY_ALIAS_PATH,
+        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA
+      }
     });
   });
 
-  app.post("/api/agent-captcha/verify", async (req, res) => {
+  async function handleVerifyRequest(req: Request, res: Response, source: "alias" | "v2"): Promise<void> {
+    if (source === "alias") {
+      state.migrationTelemetry.verifyAliasCalls += 1;
+      state.migrationTelemetry.lastVerifyAliasAt = new Date().toISOString();
+      res.setHeader("deprecation", "true");
+      res.setHeader("link", `<${VERIFY_V2_PATH}>; rel="successor-version"`);
+    } else {
+      state.migrationTelemetry.verifyV2Calls += 1;
+      state.migrationTelemetry.lastVerifyV2At = new Date().toISOString();
+    }
+
     const parsed = verifyRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "invalid_verify_request" });
+      res.status(400).json({ error: "invalid_verify_request" });
+      return;
     }
 
     const payload = parsed.data;
     const stored = state.challenges.get(payload.proof.payload.challengeId);
     if (!stored) {
-      return res.status(404).json({ error: "unknown_challenge" });
+      res.status(404).json({ error: "unknown_challenge" });
+      return;
     }
 
     if (stored.consumed) {
-      return res.status(409).json({ error: "challenge_already_used" });
+      res.status(409).json({ error: "challenge_already_used" });
+      return;
     }
 
     if (stored.expectedAgentId !== payload.agentId) {
-      return res.status(400).json({ error: "agent_mismatch" });
+      res.status(400).json({ error: "agent_mismatch" });
+      return;
     }
 
     const registered = agentMap.get(payload.agentId);
     if (!registered) {
-      return res.status(404).json({ error: "unknown_agent" });
+      res.status(404).json({ error: "unknown_agent" });
+      return;
     }
 
     if (registered.publicKeyHex !== payload.proof.payload.agentPublicKey) {
-      return res.status(400).json({ error: "agent_public_key_mismatch" });
+      res.status(400).json({ error: "agent_public_key_mismatch" });
+      return;
     }
 
     const verification = await verifyAgentProof({
@@ -333,13 +474,22 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     });
 
     if (!verification.valid) {
-      return res.status(401).json({ error: verification.reason ?? "verification_failed" });
+      res.status(401).json({ error: verification.reason ?? "verification_failed" });
+      return;
     }
 
     stored.consumed = true;
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
     const accessToken = createToken({ agentId: payload.agentId, exp: expSeconds }, config.accessTokenSecret);
-    return res.json({ accessToken, expiresAt: new Date(expSeconds * 1000).toISOString() });
+    res.json({ accessToken, expiresAt: new Date(expSeconds * 1000).toISOString() });
+  }
+
+  app.post(VERIFY_V2_PATH, (req, res) => {
+    void handleVerifyRequest(req, res, "v2");
+  });
+
+  app.post(VERIFY_ALIAS_PATH, (req, res) => {
+    void handleVerifyRequest(req, res, "alias");
   });
 
   function requireAgentToken(req: Request, res: Response, next: NextFunction): void {

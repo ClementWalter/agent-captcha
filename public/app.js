@@ -6,6 +6,7 @@ const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
 const refreshButton = document.getElementById("refresh-button");
 const runbookElement = document.getElementById("runbook");
+const migrationStatusElement = document.getElementById("migration-status");
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -132,18 +133,32 @@ async function refreshRunbook() {
   }
 }
 
+async function refreshMigrationStatus() {
+  try {
+    const response = await fetch("/api/agent-captcha/migration-status", { method: "GET" });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${await response.text()}`);
+    }
+
+    const migrationStatus = await response.json();
+    migrationStatusElement.textContent = JSON.stringify(migrationStatus, null, 2);
+  } catch (error) {
+    migrationStatusElement.textContent = `Migration telemetry load failed: ${error.message}`;
+  }
+}
+
 refreshButton.addEventListener("click", () => {
   refreshMessages().catch((error) => {
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
 });
 
-Promise.all([refreshMessages(), refreshRunbook()]).catch((error) => {
+Promise.all([refreshMessages(), refreshRunbook(), refreshMigrationStatus()]).catch((error) => {
   setThreadStatus(`Initial load failed: ${error.message}`);
 });
 
 window.setInterval(() => {
-  refreshMessages().catch((error) => {
+  Promise.all([refreshMessages(), refreshMigrationStatus()]).catch((error) => {
     // Why: polling failures should not break the read-only client.
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });

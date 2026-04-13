@@ -4,14 +4,16 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  COMMITLLM_BINDING_VERSION,
   computeChallengeAnswer,
-  computeCommitHash,
+  computeCommitLLMBindingHash,
   computeOutputHash,
   createAgentProof,
   type AgentChallenge,
   type CommitLLMReceipt,
   verifyAgentProof
 } from "../../src/sdk";
+import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
 
 const challenge: AgentChallenge = {
   challengeId: "11111111-1111-4111-8111-111111111111",
@@ -33,21 +35,37 @@ const signer = {
 };
 
 function buildReceipt(modelOutputHash: string): CommitLLMReceipt {
+  const fixture = loadCommitLLMFixture();
   const answer = computeChallengeAnswer(challenge, signer.agentId);
 
-  return {
+  const receipt: CommitLLMReceipt = {
     challengeId: challenge.challengeId,
     model: "llama-3.1-8b-w8a8",
     provider: "commitllm",
     auditMode: "routine",
     outputHash: modelOutputHash,
-    commitHash: computeCommitHash(challenge.challengeId, answer, modelOutputHash, "llama-3.1-8b-w8a8", "routine"),
+    commitHash: fixture.commitHash,
     issuedAt: "2026-01-01T00:00:20.000Z",
+    bindingVersion: COMMITLLM_BINDING_VERSION,
+    bindingHash: "",
     artifacts: {
-      auditBinaryBase64: Buffer.from("audit-binary").toString("base64"),
-      verifierKeyJson: JSON.stringify({ key_id: "demo-key" })
+      auditBinaryBase64: fixture.auditBinaryBase64,
+      verifierKeyJson: fixture.verifierKeyJson,
+      auditBinarySha256: fixture.auditBinarySha256,
+      verifierKeySha256: fixture.verifierKeySha256
     }
   };
+
+  receipt.bindingHash = computeCommitLLMBindingHash({
+    challengeId: challenge.challengeId,
+    answer,
+    modelOutputHash,
+    receipt,
+    auditBinarySha256: fixture.auditBinarySha256,
+    verifierKeySha256: fixture.verifierKeySha256
+  });
+
+  return receipt;
 }
 
 describe("agent-captcha sdk", () => {
@@ -61,16 +79,10 @@ describe("agent-captcha sdk", () => {
     expect(computeOutputHash("hello")).toBe("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
   });
 
-  it("computes stable commit hashes", () => {
-    expect(
-      computeCommitHash(
-        challenge.challengeId,
-        "a869260b0ef754a9663330557a06f0499638e854cf73f274fcb62a0d05a19be0",
-        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        "llama-3.1-8b-w8a8",
-        "routine"
-      )
-    ).toBe("48d977dbc63a94833435df00d8c29d2cafd9a5f7b3ab84d44d3221863bc008e4");
+  it("computes stable binding hashes", () => {
+    const modelOutputHash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const receipt = buildReceipt(modelOutputHash);
+    expect(receipt.bindingHash).toBe("f50db4858ad42542d83cc429c082b824833d4c03e23d69c5afc720771228d158");
   });
 
   it("verifies valid proofs", async () => {
@@ -127,7 +139,7 @@ describe("agent-captcha sdk", () => {
     expect(result.reason).toBe("challenge_expired");
   });
 
-  it("rejects commit hash mismatch", async () => {
+  it("rejects binding hash mismatch", async () => {
     const modelOutput = "challenge=11111111-1111-4111-8111-111111111111;answer=ok";
     const modelOutputHash = computeOutputHash(modelOutput);
     const receipt = buildReceipt(modelOutputHash);
@@ -140,7 +152,7 @@ describe("agent-captcha sdk", () => {
       auditMode: "routine",
       commitReceipt: {
         ...receipt,
-        commitHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        bindingHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       now: new Date("2026-01-01T00:00:25.000Z")
     });
@@ -155,6 +167,6 @@ describe("agent-captcha sdk", () => {
       now: new Date("2026-01-01T00:01:00.000Z")
     });
 
-    expect(result.reason).toBe("commit_hash_mismatch");
+    expect(result.reason).toBe("receipt_binding_hash_mismatch");
   });
 });
