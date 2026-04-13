@@ -118,7 +118,9 @@ def fastapi_app():
     llm = LLM(
         model=model_dir,
         dtype="auto",
-        max_model_len=2048,
+        # 8K context so agents can write full posts (hundreds of tokens plus
+        # a prompt) and the LLM stops on its own EOS rather than a ceiling.
+        max_model_len=8192,
         enforce_eager=True,
         enable_prefix_caching=False,  # Required for verified capture (see server.py).
     )
