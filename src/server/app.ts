@@ -15,7 +15,7 @@ import {
   type CommitReceiptVerifier,
   verifyAgentProof
 } from "../sdk";
-import { CommitLLMBinaryReceiptVerifier } from "./commitllmVerifier";
+import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
 
 const logger = pino({ name: "agent-captcha-api" });
 
@@ -103,10 +103,14 @@ const verifyRequestSchema = z.object({
         bindingHash: z.string().regex(hex64Regex),
         artifacts: z.object({
           auditBinaryBase64: z.string().min(1),
-          verifierKeyJson: z.string().min(2),
+          // Required: the receipt binds to the verifier key by SHA256.
+          // The sidecar holds the authoritative key and enforces this hash.
+          verifierKeySha256: z.string().regex(hex64Regex),
           verifierKeyId: z.string().min(1).max(200).optional(),
           auditBinarySha256: z.string().regex(hex64Regex).optional(),
-          verifierKeySha256: z.string().regex(hex64Regex).optional()
+          // Optional: full verifier key JSON. Omit when using a remote
+          // verifier that holds the key itself (e.g. Modal sidecar).
+          verifierKeyJson: z.string().min(2).optional()
         })
       }),
       createdAt: z.string()
@@ -159,14 +163,17 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
 }
 
 const defaultConfig: AppConfig = {
-  challengeTtlMs: 2 * 60 * 1000,
+  // Modal cold-start for CommitLLM sidecar (vLLM boot + model load) can take
+  // 60-180s. Keep challenge lifetime comfortably above that so first-hit
+  // clients don't see challenge_expired on fresh containers.
+  challengeTtlMs: 10 * 60 * 1000,
   tokenTtlMs: 15 * 60 * 1000,
   accessTokenSecret: "demo-agent-token-secret",
   policy: {
     allowedModels: ["llama-3.1-8b-w8a8", "qwen2.5-7b-w8a8"],
     allowedAuditModes: ["routine", "deep"],
     requiresCommitReceipt: true,
-    maxChallengeAgeMs: 2 * 60 * 1000
+    maxChallengeAgeMs: 10 * 60 * 1000
   },
   registeredAgents: [
     {
@@ -201,10 +208,18 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     }
   };
   const agentMap = new Map(config.registeredAgents.map((entry) => [entry.agentId, entry]));
-  const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMBinaryReceiptVerifier();
+  const modalSidecarUrl = process.env.MODAL_SIDECAR_URL;
+  if (!config.commitReceiptVerifier && !modalSidecarUrl) {
+    throw new Error("MODAL_SIDECAR_URL env var is required when no custom commitReceiptVerifier is provided");
+  }
+  const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMModalReceiptVerifier({
+    sidecarUrl: modalSidecarUrl!
+  });
 
   app.use(cors());
-  app.use(express.json());
+  // Audit binaries from CommitLLM receipts can be a few MB — lift the default
+  // 100 KB body cap so verify proofs can be submitted inline.
+  app.use(express.json({ limit: "20mb" }));
   app.use(express.static(path.resolve(process.cwd(), "public")));
 
   app.get("/api/health", (_req, res) => {
@@ -242,7 +257,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
             "proof.payload.commitReceipt.bindingVersion",
             "proof.payload.commitReceipt.bindingHash",
             "proof.payload.commitReceipt.artifacts.auditBinaryBase64",
-            "proof.payload.commitReceipt.artifacts.verifierKeyJson",
+            "proof.payload.commitReceipt.artifacts.verifierKeySha256",
             "proof.signature"
           ],
           responseKeys: ["accessToken", "expiresAt"]

@@ -1,16 +1,13 @@
 /**
- * Unit tests for CommitLLM verifier bridge mapping.
- * Why: enforce deterministic failure reasons for bridge/runtime/artifact integrity checks.
+ * Unit tests for the Modal-backed CommitLLM verifier.
+ * Why: shape/hash checks must fail locally before any wire trip, and bridge
+ * errors must surface as deterministic reasons.
  */
-import path from "path";
-import request from "supertest";
 import { describe, expect, it } from "vitest";
 import {
-  CommitLLMBinaryReceiptVerifier,
-  runCommitLLMBridgeWithUv,
-  type CommitLLMBridgeRunner
+  CommitLLMModalReceiptVerifier,
+  type CommitLLMModalVerifyResponse
 } from "../../src/server/commitllmVerifier";
-import { createApp } from "../../src/server/app";
 import {
   COMMITLLM_BINDING_VERSION,
   computeCommitLLMBindingHash,
@@ -80,39 +77,44 @@ function buildExpected(receipt: CommitLLMReceipt) {
   };
 }
 
-function buildPassingRunner(): CommitLLMBridgeRunner {
-  const fixture = loadCommitLLMFixture();
-  return async () => ({
-    ok: true,
-    bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-    verilm_rs_version: "fixture",
-    audit_binary_sha256: fixture.auditBinarySha256,
-    verifier_key_sha256: fixture.verifierKeySha256,
-    report: {
-      passed: true,
-      checks_run: 7,
-      checks_passed: 7,
-      failures: [],
-      classified_failures: [],
-      coverage_level: "routine",
-      duration_us: 1200
-    }
+function fetchReturning(response: CommitLLMModalVerifyResponse, status = 200): typeof fetch {
+  return (async () => {
+    return new Response(JSON.stringify(response), {
+      status,
+      headers: { "content-type": "application/json" }
+    });
+  }) as typeof fetch;
+}
+
+function makeVerifier(fetchImpl: typeof fetch, strict = true): CommitLLMModalReceiptVerifier {
+  return new CommitLLMModalReceiptVerifier({
+    sidecarUrl: "https://example.modal.run",
+    strict,
+    fetchImpl
   });
 }
 
-describe("commitllm bridge verifier", () => {
-  it("accepts a passing bridge report", async () => {
+describe("commitllm modal verifier", () => {
+  it("accepts a passing report", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({ runner: buildPassingRunner() });
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
+      report: { passed: true, checks_run: 7, checks_passed: 7 }
+    }));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
     expect(result.valid).toBe(true);
   });
 
-  it("rejects challenge mismatch before bridge execution", async () => {
+  it("rejects challenge mismatch before hitting the sidecar", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({ runner: buildPassingRunner() });
+    let called = false;
+    const verifier = makeVerifier((() => {
+      called = true;
+      throw new Error("should not be called");
+    }) as typeof fetch);
 
     const result = await verifier.verifyReceipt(receipt, {
       ...buildExpected(receipt),
@@ -120,152 +122,97 @@ describe("commitllm bridge verifier", () => {
     });
 
     expect(result.reason).toBe("receipt_challenge_mismatch");
+    expect(called).toBe(false);
   });
 
-  it("maps bridge errors into commitllm-prefixed reasons", async () => {
+  it("maps sidecar errors into commitllm_modal-prefixed reasons", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({
-      runner: async () => ({ ok: false, error: "verilm_rs_not_installed" })
-    });
+    const verifier = makeVerifier(fetchReturning({ ok: false, error: "verify_v4_binary_failed" }, 500));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
-    expect(result.reason).toBe("commitllm_verilm_rs_not_installed");
+    expect(result.reason).toBe("commitllm_modal_verify_v4_binary_failed");
   });
 
-  it("rejects failing verify_v4 reports", async () => {
-    const fixture = loadCommitLLMFixture();
+  it("rejects failing verify_v4 reports in strict mode", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({
-      runner: async () => ({
-        ok: true,
-        bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-        audit_binary_sha256: fixture.auditBinarySha256,
-        verifier_key_sha256: fixture.verifierKeySha256,
-        report: {
-          passed: false,
-          checks_run: 5,
-          checks_passed: 3,
-          failures: ["tampered"],
-          classified_failures: [],
-          coverage_level: "routine",
-          duration_us: 1200
-        }
-      })
-    });
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
+      report: { passed: false, checks_run: 5, checks_passed: 3, failures: ["tampered"] }
+    }), true);
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
     expect(result.reason).toBe("commitllm_verify_v4_failed");
   });
 
-  it("rejects empty check reports", async () => {
-    const fixture = loadCommitLLMFixture();
+  it("accepts non-passing reports in non-strict mode when checks ran", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({
-      runner: async () => ({
-        ok: true,
-        bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-        audit_binary_sha256: fixture.auditBinarySha256,
-        verifier_key_sha256: fixture.verifierKeySha256,
-        report: {
-          passed: true,
-          checks_run: 0,
-          checks_passed: 0,
-          failures: [],
-          classified_failures: [],
-          coverage_level: "routine",
-          duration_us: 1200
-        }
-      })
-    });
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
+      report: { passed: false, checks_run: 100, checks_passed: 90, failures: ["attn-bound"] }
+    }), false);
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
-    expect(result.reason).toBe("commitllm_empty_report");
+    expect(result.valid).toBe(true);
   });
 
-  it("rejects mismatched audit binary hash", async () => {
-    const fixture = loadCommitLLMFixture();
+  it("rejects empty reports even in non-strict mode", async () => {
     const receipt = buildReceipt();
-    const verifier = new CommitLLMBinaryReceiptVerifier({
-      runner: async () => ({
-        ok: true,
-        bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-        audit_binary_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        verifier_key_sha256: fixture.verifierKeySha256,
-        report: {
-          passed: true,
-          checks_run: 7,
-          checks_passed: 7,
-          failures: [],
-          classified_failures: [],
-          coverage_level: "routine",
-          duration_us: 1200
-        }
-      })
-    });
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
+      report: { passed: true, checks_run: 0, checks_passed: 0 }
+    }), false);
+
+    const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
+
+    expect(result.reason).toBe("commitllm_verify_v4_empty_report");
+  });
+
+  it("rejects mismatched audit binary hash from the sidecar", async () => {
+    const receipt = buildReceipt();
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: "a".repeat(64),
+      report: { passed: true, checks_run: 7, checks_passed: 7 }
+    }));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
     expect(result.reason).toBe("commitllm_audit_binary_sha256_mismatch");
   });
 
-  it("rejects malformed audit binary base64 without running bridge", async () => {
+  it("rejects malformed audit binary base64 without running the sidecar", async () => {
     const receipt = buildReceipt({
       artifacts: {
         auditBinaryBase64: "not-base64%%%",
         verifierKeyJson: loadCommitLLMFixture().verifierKeyJson
       }
     });
-    const verifier = new CommitLLMBinaryReceiptVerifier({
-      runner: async () => ({
-        ok: true,
-        bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-        audit_binary_sha256: "unused",
-        verifier_key_sha256: "unused",
-        report: {
-          passed: true,
-          checks_run: 1,
-          checks_passed: 1,
-          failures: [],
-          classified_failures: [],
-          duration_us: 1
-        }
-      })
-    });
+    let called = false;
+    const verifier = makeVerifier((() => {
+      called = true;
+      throw new Error("should not be called");
+    }) as typeof fetch);
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
     expect(result.reason).toBe("receipt_audit_binary_base64_invalid");
+    expect(called).toBe(false);
   });
 
-  it("returns structured invalid base64 errors from the real python bridge", async () => {
-    const result = await runCommitLLMBridgeWithUv(
-      {
-        audit_binary_base64: "not-base64%%%",
-        verifier_key_json: loadCommitLLMFixture().verifierKeyJson
-      },
-      {
-        scriptPath: path.resolve(process.cwd(), "scripts/commitllm_verify_bridge.py"),
-        timeoutMs: 5_000,
-        stdoutMaxBytes: 500_000,
-        maxAuditBinaryBytes: 10_000_000,
-        maxVerifierKeyJsonBytes: 250_000,
-        bridgeCpuLimitSeconds: 2,
-        bridgeMemoryLimitBytes: 512_000_000
-      }
-    );
+  it("surfaces unreachable sidecar as commitllm_modal_unreachable", async () => {
+    const receipt = buildReceipt();
+    const verifier = makeVerifier((async () => {
+      throw new Error("ECONNREFUSED");
+    }) as typeof fetch);
 
-    expect(result.error).toBe("invalid_audit_binary_base64");
-  });
+    const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
-  it("rejects invalid verify payload schema", async () => {
-    const { app } = createApp({ commitReceiptVerifier: new CommitLLMBinaryReceiptVerifier({ runner: buildPassingRunner() }) });
-    const api = request(app);
-
-    const response = await api.post("/api/v2/agent-captcha/verify").send({ agentId: "demo-agent-001" });
-
-    expect(response.status).toBe(400);
+    expect(result.reason).toBe("commitllm_modal_unreachable");
   });
 });

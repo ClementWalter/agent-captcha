@@ -1,0 +1,14 @@
+node_modules
+.smithers
+smithers.db*
+executions
+tests
+.git
+.github
+.gitignore
+coverage
+dist
+*.log
+.DS_Store
+scripts/demo-agent.ts
+modal

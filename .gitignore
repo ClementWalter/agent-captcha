@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.vite/
+.DS_Store
+
+# Smithers workflow engine — local state, not source.
+smithers.db
+smithers.db-shm
+smithers.db-wal
+.smithers/executions/
+
+# Bun lockfile — we're npm-primary.
+bun.lock

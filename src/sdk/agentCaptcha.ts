@@ -26,10 +26,21 @@ export interface AgentChallenge {
 
 export interface CommitLLMArtifacts {
   auditBinaryBase64: string;
-  verifierKeyJson: string;
+  /**
+   * The verifier key SHA256. Required: this is what the receipt binds to.
+   * The full key JSON is not shipped — it can be >1GB for a 7B model. The
+   * trusted verifier (Modal sidecar) holds the authoritative copy and
+   * validates audit binaries against it on request.
+   */
+  verifierKeySha256: string;
   verifierKeyId?: string;
   auditBinarySha256?: string;
-  verifierKeySha256?: string;
+  /**
+   * Optional: full verifier key JSON. If supplied, the SDK will recompute its
+   * SHA256 and cross-check against `verifierKeySha256`. Omit when bridging to
+   * a remote verifier that holds the key itself.
+   */
+  verifierKeyJson?: string;
 }
 
 export const COMMITLLM_BINDING_VERSION = "agent-captcha-binding-v1" as const;
@@ -217,14 +228,25 @@ function deriveArtifactHashes(receipt: CommitLLMReceipt): { auditBinarySha256: s
     throw new Error("receipt_artifact_audit_sha256_mismatch");
   }
 
-  const computedVerifierKeySha256 = computeVerifierKeySha256(receipt.artifacts.verifierKeyJson);
-  if (receipt.artifacts.verifierKeySha256 && receipt.artifacts.verifierKeySha256 !== computedVerifierKeySha256) {
-    throw new Error("receipt_artifact_verifier_key_sha256_mismatch");
+  // When the receipt carries the full verifier key JSON, hash it and verify.
+  // When it carries only the sha256 (remote-verifier mode), trust the stated
+  // hash — the remote verifier will cross-check it against its own cached key.
+  let verifierKeySha256: string;
+  if (receipt.artifacts.verifierKeyJson) {
+    verifierKeySha256 = computeVerifierKeySha256(receipt.artifacts.verifierKeyJson);
+    if (receipt.artifacts.verifierKeySha256 !== verifierKeySha256) {
+      throw new Error("receipt_artifact_verifier_key_sha256_mismatch");
+    }
+  } else {
+    if (!/^[0-9a-f]{64}$/.test(receipt.artifacts.verifierKeySha256)) {
+      throw new Error("receipt_artifact_verifier_key_sha256_invalid");
+    }
+    verifierKeySha256 = receipt.artifacts.verifierKeySha256;
   }
 
   return {
     auditBinarySha256: computedAuditBinarySha256,
-    verifierKeySha256: computedVerifierKeySha256
+    verifierKeySha256
   };
 }
 

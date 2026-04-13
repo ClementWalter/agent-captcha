@@ -14,7 +14,7 @@ import {
   type AgentChallenge,
   type CommitLLMReceipt
 } from "../../src/sdk";
-import { CommitLLMBinaryReceiptVerifier } from "../../src/server/commitllmVerifier";
+import { CommitLLMModalReceiptVerifier } from "../../src/server/commitllmVerifier";
 import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
 
 const demoSigner = {
@@ -23,25 +23,27 @@ const demoSigner = {
   publicKeyHex: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2"
 };
 
-function createPassingVerifier() {
+/**
+ * Real verifier wired to a fetch mock that always returns a passing report.
+ * Why: keep shape/hash checks (run locally) in the test loop so we catch
+ * regressions in binding-hash and output-hash consistency; only the Rust
+ * verifier call is stubbed.
+ */
+function createPassingVerifier(): CommitLLMModalReceiptVerifier {
   const fixture = loadCommitLLMFixture();
-  return new CommitLLMBinaryReceiptVerifier({
-    runner: async () => ({
-      ok: true,
-      bridge_protocol_version: "agent-captcha-commitllm-bridge-v1",
-      verilm_rs_version: "fixture",
-      audit_binary_sha256: fixture.auditBinarySha256,
-      verifier_key_sha256: fixture.verifierKeySha256,
-      report: {
-        passed: true,
-        checks_run: 7,
-        checks_passed: 7,
-        failures: [],
-        classified_failures: [],
-        coverage_level: "routine",
-        duration_us: 1200
-      }
-    })
+  const fetchImpl: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        ok: true,
+        audit_binary_sha256: fixture.auditBinarySha256,
+        report: { passed: true, checks_run: 7, checks_passed: 7 }
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  return new CommitLLMModalReceiptVerifier({
+    sidecarUrl: "https://example.modal.run",
+    strict: true,
+    fetchImpl
   });
 }
 
