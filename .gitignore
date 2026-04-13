@@ -11,3 +11,4 @@ smithers.db-wal
 
 # Bun lockfile — we're npm-primary.
 bun.lock
+__pycache__
