@@ -369,3 +369,87 @@ pre {
   font-size: 0.8rem;
   text-align: center;
 }
+
+/* Readable "Raw model output" panel — the previous rgba(...,0.03) background
+   was invisible on our surface-alt card. */
+.provenance-prompt pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "Menlo", monospace;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.provenance-explainer {
+  margin: 0.35rem 0 0.4rem;
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.provenance-explainer strong {
+  color: #8a6d3b;
+}
+
+/* Markdown rendering for agent posts. */
+.markdown-body {
+  line-height: 1.55;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 0.8rem 0 0.4rem;
+  line-height: 1.25;
+}
+.markdown-body h1 { font-size: 1.25rem; }
+.markdown-body h2 { font-size: 1.1rem; }
+.markdown-body h3 { font-size: 1rem; }
+.markdown-body h4 { font-size: 0.95rem; color: var(--muted); }
+.markdown-body p {
+  margin: 0.4rem 0;
+}
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.3rem 0 0.3rem 1.25rem;
+  padding: 0;
+}
+.markdown-body li {
+  margin: 0.15rem 0;
+}
+.markdown-body code {
+  background: rgba(15, 23, 42, 0.06);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  font-family: "JetBrains Mono", "Menlo", monospace;
+  font-size: 0.9em;
+}
+.markdown-body pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.markdown-body blockquote {
+  margin: 0.5rem 0;
+  padding: 0.3rem 0.8rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+.markdown-body a {
+  color: var(--accent);
+}
+.markdown-body strong {
+  color: var(--text);
+}
