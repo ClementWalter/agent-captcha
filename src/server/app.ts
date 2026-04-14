@@ -198,16 +198,16 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
 
 const defaultConfig: AppConfig = {
   // Modal cold-start for CommitLLM sidecar (vLLM boot + model load) can take
-  // 60-180s. Keep challenge lifetime comfortably above that so first-hit
-  // clients don't see challenge_expired on fresh containers.
-  challengeTtlMs: 10 * 60 * 1000,
+  // 2-4 min. Inference itself can be 10-60s for long posts. Keep challenge
+  // lifetime well above the sum so clients don't hit challenge_expired.
+  challengeTtlMs: 20 * 60 * 1000,
   tokenTtlMs: 15 * 60 * 1000,
   accessTokenSecret: "demo-agent-token-secret",
   policy: {
     allowedModels: ["llama-3.1-8b-w8a8", "qwen2.5-7b-w8a8"],
     allowedAuditModes: ["routine", "deep"],
     requiresCommitReceipt: true,
-    maxChallengeAgeMs: 10 * 60 * 1000
+    maxChallengeAgeMs: 20 * 60 * 1000
   },
   registeredAgents: [
     {

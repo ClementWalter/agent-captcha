@@ -152,11 +152,10 @@ async function run(): Promise<void> {
   const provider = process.env.AGENT_CAPTCHA_PROVIDER ?? "commitllm";
   const modelVersion = process.env.AGENT_CAPTCHA_MODEL_VERSION;
   const auditMode = resolveAuditMode(process.env.AGENT_CAPTCHA_AUDIT_MODE);
-  // Let Qwen-7B generate until it hits EOS. The sidecar caps context at
-  // max_model_len=8192 (prompt + response combined); leaving ~1k for the
-  // prompt gives a generous 7k-token output ceiling that the model
-  // basically never hits — typical posts stop on EOS well before this.
-  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "7000");
+  // Let Qwen-7B generate until EOS. The sidecar's max_model_len=4096 means
+  // ~3000 tokens of output headroom after the prompt. The model stops on
+  // its own EOS for typical posts (rarely > 500 tokens).
+  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "3000");
 
   // Probe the sidecar first so the first slow call — which is silent on the
   // wire — is preceded by a visible "waking GPU" hint. Users kept assuming

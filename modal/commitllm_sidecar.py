@@ -118,9 +118,10 @@ def fastapi_app():
     llm = LLM(
         model=model_dir,
         dtype="auto",
-        # 8K context so agents can write full posts (hundreds of tokens plus
-        # a prompt) and the LLM stops on its own EOS rather than a ceiling.
-        max_model_len=8192,
+        # 4K context — 8K caused 13-min cold starts on L4 because of KV cache
+        # allocation. 4K leaves ~3000 tokens for output (more than enough for
+        # any real post) while keeping cold starts under 3 min.
+        max_model_len=4096,
         enforce_eager=True,
         enable_prefix_caching=False,  # Required for verified capture (see server.py).
     )
