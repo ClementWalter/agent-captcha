@@ -543,9 +543,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       verifierKeySha256: receipt.artifacts.verifierKeySha256,
       ...(receipt.artifacts.verifierKeyId ? { verifierKeyId: receipt.artifacts.verifierKeyId } : {}),
       report: verification.report ?? { passed: true, checksRun: 0, checksPassed: 0, failures: [] },
-      // Snippet of the modelOutput signed by the agent. We cap length to
-      // keep the thread feed compact.
-      modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120)
+      modelOutputHint: payload.proof.payload.modelOutput
     };
     state.verifications.set(verifyId, { verifyId, agentId: payload.agentId, provenance });
 
