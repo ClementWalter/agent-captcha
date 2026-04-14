@@ -106,6 +106,35 @@ function computeCommitHash(commitment: Record<string, unknown>): string {
 }
 
 /**
+ * Trim text to 280 chars at the nearest sentence boundary. If no sentence
+ * ends before 280, fall back to the last word boundary.
+ */
+function trimToTweet(text: string, limit = 280): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  const chunk = text.slice(0, limit);
+  // Try to cut at last sentence-ending punctuation.
+  const sentenceEnd = Math.max(
+    chunk.lastIndexOf(". "),
+    chunk.lastIndexOf("! "),
+    chunk.lastIndexOf("? "),
+    chunk.lastIndexOf(".\n"),
+    chunk.lastIndexOf("!\n"),
+    chunk.lastIndexOf("?\n")
+  );
+  if (sentenceEnd > limit * 0.4) {
+    return chunk.slice(0, sentenceEnd + 1).trim();
+  }
+  // Fall back to last word boundary.
+  const wordEnd = chunk.lastIndexOf(" ");
+  if (wordEnd > limit * 0.4) {
+    return chunk.slice(0, wordEnd).trim() + "…";
+  }
+  return chunk.trim() + "…";
+}
+
+/**
  * Extract the first CLI positional argument as the prompt, fall back to env,
  * fall back to a sensible demo question. Anything after `--` is treated as
  * one prompt string so you can write `npm run demo:agent -- What is 2+2?`.
@@ -152,9 +181,10 @@ async function run(): Promise<void> {
   const provider = process.env.AGENT_CAPTCHA_PROVIDER ?? "commitllm";
   const modelVersion = process.env.AGENT_CAPTCHA_MODEL_VERSION;
   const auditMode = resolveAuditMode(process.env.AGENT_CAPTCHA_AUDIT_MODE);
-  // Short-form posts only (Twitter-style, 280 chars ≈ 80 tokens). The model
-  // often stops on EOS before this for concise answers.
-  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "80");
+  // Give the model enough room to finish a thought, then we trim to 280 chars
+  // at the nearest sentence boundary. 150 tokens ≈ 400-500 chars — plenty of
+  // headroom for the model to land a complete sentence under 280.
+  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "150");
 
   // Probe the sidecar first so the first slow call — which is silent on the
   // wire — is preceded by a visible "waking GPU" hint. Users kept assuming
@@ -177,13 +207,26 @@ async function run(): Promise<void> {
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
 
   // 2. Real inference on Modal GPU. The LLM's generated text IS the post.
+  // Wrap the user's prompt with a system instruction so Qwen stays concise.
+  // Qwen2.5-Instruct uses ChatML format — <|im_start|>system\n...<|im_end|>.
+  const fullPrompt = [
+    "<|im_start|>system",
+    "You are an autonomous AI agent posting to a public wall. Keep your reply under 280 characters — one punchy thought, no preamble, no hashtags. Write like a tweet, not an essay.",
+    "<|im_end|>",
+    "<|im_start|>user",
+    prompt,
+    "<|im_end|>",
+    "<|im_start|>assistant",
+    ""
+  ].join("\n");
+
   logger.info({ sidecarUrl, n_tokens: nTokens }, "Running verified inference");
   const chatTimer = Date.now();
   const stopChatHeartbeat = startHeartbeat("still waiting for GPU inference");
   let chat: ChatResponse;
   try {
     chat = await postJson<ChatResponse>(`${sidecarUrl}/v1/chat`, {
-      prompt,
+      prompt: fullPrompt,
       n_tokens: nTokens,
       temperature: 0
     });
@@ -192,11 +235,12 @@ async function run(): Promise<void> {
   }
   logger.info({ inferenceMs: Date.now() - chatTimer, generated: chat.generated_text.slice(0, 80) }, "inference done");
 
-  // Trim to 280 chars (Twitter-style). The model output hash covers the FULL
-  // text from the GPU; the posted content is the human-visible truncation.
+  // Trim to 280 chars at the nearest sentence boundary so posts don't cut
+  // mid-word. The model output hash covers the FULL GPU output; the posted
+  // content is the human-visible truncation.
   const fullOutput = chat.generated_text;
-  const modelOutput = fullOutput.trim().slice(0, 280);
   const modelOutputHash = computeOutputHash(fullOutput);
+  const modelOutput = trimToTweet(fullOutput.trim());
 
   // 3. Open the audit binary for the first generated token over 10 layers.
   logger.info({ request_id: chat.request_id }, "Opening audit binary");
