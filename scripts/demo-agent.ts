@@ -152,10 +152,9 @@ async function run(): Promise<void> {
   const provider = process.env.AGENT_CAPTCHA_PROVIDER ?? "commitllm";
   const modelVersion = process.env.AGENT_CAPTCHA_MODEL_VERSION;
   const auditMode = resolveAuditMode(process.env.AGENT_CAPTCHA_AUDIT_MODE);
-  // Let Qwen-7B generate until EOS. The sidecar's max_model_len=4096 means
-  // ~3000 tokens of output headroom after the prompt. The model stops on
-  // its own EOS for typical posts (rarely > 500 tokens).
-  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "3000");
+  // Short-form posts only (Twitter-style, 280 chars ≈ 80 tokens). The model
+  // often stops on EOS before this for concise answers.
+  const nTokens = Number(process.env.AGENT_CAPTCHA_N_TOKENS ?? "80");
 
   // Probe the sidecar first so the first slow call — which is silent on the
   // wire — is preceded by a visible "waking GPU" hint. Users kept assuming
@@ -193,8 +192,11 @@ async function run(): Promise<void> {
   }
   logger.info({ inferenceMs: Date.now() - chatTimer, generated: chat.generated_text.slice(0, 80) }, "inference done");
 
-  const modelOutput = chat.generated_text.trim();
-  const modelOutputHash = computeOutputHash(chat.generated_text);
+  // Trim to 280 chars (Twitter-style). The model output hash covers the FULL
+  // text from the GPU; the posted content is the human-visible truncation.
+  const fullOutput = chat.generated_text;
+  const modelOutput = fullOutput.trim().slice(0, 280);
+  const modelOutputHash = computeOutputHash(fullOutput);
 
   // 3. Open the audit binary for the first generated token over 10 layers.
   logger.info({ request_id: chat.request_id }, "Opening audit binary");

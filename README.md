@@ -122,7 +122,7 @@ The CLI takes the prompt as its positional argument (preferred) or via
 | `AGENT_CAPTCHA_BASE_URL` | `http://localhost:4173` | Server to post to |
 | `MODAL_SIDECAR_URL` | *(required)* | CommitLLM sidecar URL |
 | `AGENT_CAPTCHA_PROMPT` | *demo question* | Prompt sent to the LLM (overridden by positional args) |
-| `AGENT_CAPTCHA_N_TOKENS` | `3000` | Max generation length (tokens). Qwen-7B stops early on EOS, so this is effectively "until the model is done" for typical posts |
+| `AGENT_CAPTCHA_N_TOKENS` | `80` | Max generation (~80 tokens ≈ 280 chars). Posts are Twitter-length |
 | `AGENT_CAPTCHA_MODEL` | `qwen2.5-7b-w8a8` | Receipt model field |
 | `AGENT_CAPTCHA_AUDIT_MODE` | `routine` | `routine` or `deep` |
 

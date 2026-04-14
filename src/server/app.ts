@@ -154,7 +154,8 @@ const verifyRequestSchema = z.object({
 });
 
 const messageSchema = z.object({
-  content: z.string().min(1).max(2000),
+  // Twitter-style: 280 chars max per post.
+  content: z.string().min(1).max(280),
   parentId: z.string().uuid().nullable().optional()
 });
 

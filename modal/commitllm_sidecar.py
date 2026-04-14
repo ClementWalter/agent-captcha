@@ -118,10 +118,9 @@ def fastapi_app():
     llm = LLM(
         model=model_dir,
         dtype="auto",
-        # 4K context — 8K caused 13-min cold starts on L4 because of KV cache
-        # allocation. 4K leaves ~3000 tokens for output (more than enough for
-        # any real post) while keeping cold starts under 3 min.
-        max_model_len=4096,
+        # 2K context — short-form posts only (Twitter-style, 280 chars).
+        # Keeps cold starts fast (~60-90s) and KV cache allocation minimal.
+        max_model_len=2048,
         enforce_eager=True,
         enable_prefix_caching=False,  # Required for verified capture (see server.py).
     )
