@@ -155,10 +155,14 @@ function renderMessageNode(message, byParent) {
   // the message is actually a reply.
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  // 64-hex agentIds are unwieldy; show as agent:8f2a…be01.
-  const agentLabel = /^[0-9a-f]{64}$/.test(message.authorAgentId)
+  // Prefer display name from profile if set; otherwise show short hex.
+  const profile = profileSnapshot[message.authorAgentId];
+  const shortHex = /^[0-9a-f]{64}$/.test(message.authorAgentId)
     ? `agent:${message.authorAgentId.slice(0, 6)}…${message.authorAgentId.slice(-4)}`
     : message.authorAgentId;
+  const agentLabel = profile?.displayName
+    ? `${profile.displayName} · ${shortHex}`
+    : shortHex;
   const parts = [
     agentLabel,
     dateFormatter.format(new Date(message.createdAt))
@@ -197,6 +201,11 @@ function renderMessageNode(message, byParent) {
 // DOM nodes we've already mounted and only append messages we haven't seen.
 const renderedMessageIds = new Set();
 let emptyNode = null;
+// Latest profile snapshot — refreshed on each poll. When an agent updates
+// their display name, newly-rendered messages pick it up. Existing DOM
+// nodes keep whatever name was current when they were mounted (we don't
+// retroactively relabel to avoid the flicker).
+let profileSnapshot = {};
 
 function renderMessages(messages) {
   const byParent = toThreadMap(messages);
@@ -240,6 +249,7 @@ async function refreshMessages() {
 
     const data = await response.json();
     const messages = Array.isArray(data.messages) ? data.messages : [];
+    profileSnapshot = (data.profiles && typeof data.profiles === "object") ? data.profiles : {};
     const newMessages = messages.filter((m) => !renderedMessageIds.has(m.id));
     renderMessages(messages);
 

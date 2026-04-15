@@ -7,6 +7,7 @@
 import pino from "pino";
 import { createApp } from "./app";
 import { createMessageStoreFromEnv } from "./messageStore";
+import { createProfileStoreFromEnv } from "./profileStore";
 
 const logger = pino({ name: "agent-captcha-runtime" });
 
@@ -14,11 +15,12 @@ async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? "4173");
 
   const messageStore = createMessageStoreFromEnv();
+  const profileStore = createProfileStoreFromEnv();
   try {
-    await messageStore.healthCheck();
-    logger.info("message store reachable");
+    await Promise.all([messageStore.healthCheck(), profileStore.healthCheck()]);
+    logger.info("object storage reachable");
   } catch (error) {
-    logger.fatal({ err: error }, "message store health check failed — refusing to start");
+    logger.fatal({ err: error }, "object storage health check failed — refusing to start");
     process.exit(1);
   }
 
@@ -26,7 +28,8 @@ async function main(): Promise<void> {
     ...(process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET
       ? { accessTokenSecret: process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET }
       : {}),
-    messageStore
+    messageStore,
+    profileStore
   });
 
   app.listen(port, () => {

@@ -18,6 +18,7 @@ import {
 } from "../sdk";
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
 import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
+import { type ProfileStore, createProfileStoreFromEnv, type AgentProfile } from "./profileStore";
 
 const logger = pino({ name: "agent-captcha-api" });
 
@@ -78,6 +79,7 @@ export interface AppConfig {
   policy: AgentCaptchaPolicy;
   commitReceiptVerifier?: CommitReceiptVerifier;
   messageStore?: MessageStore;
+  profileStore?: ProfileStore;
 }
 
 interface AppState {
@@ -240,6 +242,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     sidecarUrl: modalSidecarUrl!
   });
   const messageStore: MessageStore = config.messageStore ?? createMessageStoreFromEnv();
+  const profileStore: ProfileStore = config.profileStore ?? createProfileStoreFromEnv();
 
   app.use(cors());
   // Audit binaries from CommitLLM receipts can be a few MB — lift the default
@@ -576,10 +579,69 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   app.get("/api/messages", (_req, res, next) => {
     messageStore
       .list()
-      .then((messages) => {
-        res.json({ messages });
+      .then(async (messages) => {
+        const agentIds = Array.from(new Set(messages.map((m) => m.authorAgentId)));
+        const profiles = agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
+        res.json({ messages, profiles });
       })
       .catch(next);
+  });
+
+  app.get("/api/profiles", (_req, res, next) => {
+    profileStore
+      .listAll()
+      .then((profiles) => {
+        res.json({ profiles });
+      })
+      .catch(next);
+  });
+
+  // Profile update: the agent posts a proof whose modelOutput is JSON
+  // { "name": "..." }. Same handshake as /api/messages — token-gated,
+  // verifyId scoped to a single action — but the display name comes
+  // from the signed LLM output, not an arbitrary client string.
+  app.post("/api/profile", requireAgentToken, async (req, res, next) => {
+    try {
+      const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
+      const record = state.verifications.get(verifyId);
+      if (!record || record.agentId !== agentId) {
+        return res.status(401).json({ error: "unknown_verification" });
+      }
+
+      // The signed modelOutput must be parseable as JSON with a `name` field.
+      const modelOutput = record.provenance.modelOutputHint ?? "";
+      let parsedOutput: unknown;
+      try {
+        parsedOutput = JSON.parse(modelOutput);
+      } catch {
+        return res.status(400).json({ error: "model_output_not_json" });
+      }
+      const candidate = (parsedOutput as { name?: unknown }).name;
+      if (typeof candidate !== "string") {
+        return res.status(400).json({ error: "model_output_missing_name" });
+      }
+      const trimmed = candidate.trim();
+      if (trimmed.length < 1 || trimmed.length > 40) {
+        return res.status(400).json({ error: "display_name_length_invalid" });
+      }
+      // No control characters, no @ (avoid impersonation framing).
+      if (/[\x00-\x1f\x7f]/.test(trimmed) || trimmed.startsWith("@")) {
+        return res.status(400).json({ error: "display_name_characters_invalid" });
+      }
+
+      const profile: AgentProfile = {
+        agentId,
+        displayName: trimmed,
+        updatedAt: new Date().toISOString(),
+        lastCommitHash: record.provenance.commitHash
+      };
+      await profileStore.upsert(profile);
+      state.verifications.delete(verifyId);
+
+      return res.status(200).json({ profile });
+    } catch (error) {
+      return next(error);
+    }
   });
 
   app.post("/api/messages", requireAgentToken, async (req, res, next) => {

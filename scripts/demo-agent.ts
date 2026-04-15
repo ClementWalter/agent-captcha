@@ -161,16 +161,33 @@ function trimToTweet(text: string, limit = 280): string {
 }
 
 /**
- * Extract the first CLI positional argument as the prompt, fall back to env,
- * fall back to a sensible demo question. Anything after `--` is treated as
- * one prompt string so you can write `npm run demo:agent -- What is 2+2?`.
+ * Parse CLI args. Two modes:
+ *   npm run demo:agent -- "free-form prompt"         → post a message
+ *   npm run demo:agent -- --set-name "Alice"         → update display name
  */
-function resolvePrompt(): string {
+interface CliArgs {
+  mode: "post" | "set-name";
+  prompt: string;
+  displayName?: string;
+}
+function parseCliArgs(): CliArgs {
   const argv = process.argv.slice(2);
-  if (argv.length > 0) {
-    return argv.join(" ");
+  const setNameIdx = argv.indexOf("--set-name");
+  if (setNameIdx !== -1) {
+    const displayName = argv[setNameIdx + 1];
+    if (!displayName) {
+      throw new Error("--set-name requires a value, e.g. --set-name \"Alice\"");
+    }
+    // Ask the model to produce the exact JSON shape the server expects.
+    // The server parses modelOutput as JSON and pulls out `name` — so the
+    // signed GPU output IS the name change request.
+    const prompt = `Reply with ONLY this JSON object and nothing else, no code fences, no prose: {"name":"${displayName.replace(/"/g, "\\\"")}"}`;
+    return { mode: "set-name", prompt, displayName };
   }
-  return process.env.AGENT_CAPTCHA_PROMPT ?? "What is the capital of France? Answer with just the city name.";
+  const prompt = argv.length > 0
+    ? argv.join(" ")
+    : process.env.AGENT_CAPTCHA_PROMPT ?? "What is the capital of France? Answer with just the city name.";
+  return { mode: "post", prompt };
 }
 
 /**
@@ -201,7 +218,8 @@ function startHeartbeat(label: string, intervalMs = 15_000): () => void {
 async function run(): Promise<void> {
   const baseUrl = process.env.AGENT_CAPTCHA_BASE_URL ?? "http://localhost:4173";
   const sidecarUrl = requireEnv("MODAL_SIDECAR_URL").replace(/\/+$/, "");
-  const prompt = resolvePrompt();
+  const cliArgs = parseCliArgs();
+  const prompt = cliArgs.prompt;
   const signer = await loadOrCreateSigner();
   // Must match the server's allowed models policy (see src/server/app.ts).
   const model = process.env.AGENT_CAPTCHA_MODEL ?? "qwen2.5-7b-w8a8";
@@ -238,7 +256,9 @@ async function run(): Promise<void> {
   // Qwen2.5-Instruct uses ChatML format — <|im_start|>system\n...<|im_end|>.
   const fullPrompt = [
     "<|im_start|>system",
-    "You are an autonomous AI agent posting to a public wall. Keep your reply under 280 characters — one punchy thought, no preamble, no hashtags. Write like a tweet, not an essay.",
+    cliArgs.mode === "set-name"
+      ? "You are an autonomous AI agent. Follow the user's instructions verbatim. Do not add prose, commentary, code fences, or Markdown — output only what the user asks for."
+      : "You are an autonomous AI agent posting to a public wall. Keep your reply under 280 characters — one punchy thought, no preamble, no hashtags. Write like a tweet, not an essay.",
     "<|im_end|>",
     "<|im_start|>user",
     prompt,
@@ -326,13 +346,33 @@ async function run(): Promise<void> {
     commitReceipt
   });
 
-  // 6. Verify → access token → post the LLM's answer as the message content.
+  // 6. Verify → access token → post (message or profile update).
   logger.info("Submitting proof for verification");
   const verification = await postJson<{
     accessToken: string;
     expiresAt: string;
     provenance?: unknown;
   }>(`${baseUrl}/api/v2/agent-captcha/verify`, { agentId: signer.agentId, proof });
+
+  if (cliArgs.mode === "set-name") {
+    // The server parses the signed modelOutput as JSON {"name":"..."} and
+    // saves it as the agent's display name. No body needed here — the name
+    // comes from the signed GPU output, not the client.
+    const profileResponse = await postJson<{ profile: { displayName: string } }>(
+      `${baseUrl}/api/profile`,
+      {},
+      verification.accessToken
+    );
+    logger.info(
+      {
+        agentId: signer.agentId,
+        displayName: profileResponse.profile.displayName,
+        commitHash
+      },
+      "Display name updated"
+    );
+    return;
+  }
 
   const messageResponse = await postJson<{ message: { id: string; content: string } }>(
     `${baseUrl}/api/messages`,

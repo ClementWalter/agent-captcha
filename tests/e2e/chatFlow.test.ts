@@ -16,12 +16,13 @@ import {
 } from "../../src/sdk";
 import { CommitLLMModalReceiptVerifier } from "../../src/server/commitllmVerifier";
 import type { MessageStore } from "../../src/server/messageStore";
+import type { ProfileStore, AgentProfile } from "../../src/server/profileStore";
 import type { ChatMessage } from "../../src/server/app";
 import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
 
 /**
- * In-memory store — e2e tests are about protocol correctness, not durability,
- * so we swap out the S3-backed production store for a plain array.
+ * In-memory stores — e2e tests are about protocol correctness, not
+ * durability, so we swap out the S3-backed production stores for plain maps.
  */
 function createInMemoryMessageStore(): MessageStore {
   const messages: ChatMessage[] = [];
@@ -32,9 +33,29 @@ function createInMemoryMessageStore(): MessageStore {
     async list() {
       return messages.slice();
     },
-    async healthCheck() {
-      // Always healthy in tests.
-    }
+    async healthCheck() {}
+  };
+}
+
+function createInMemoryProfileStore(): ProfileStore {
+  const profiles: Record<string, AgentProfile> = {};
+  return {
+    async upsert(profile) {
+      profiles[profile.agentId] = profile;
+    },
+    async getMany(agentIds) {
+      const result: Record<string, AgentProfile> = {};
+      for (const id of agentIds) {
+        if (profiles[id]) {
+          result[id] = profiles[id];
+        }
+      }
+      return result;
+    },
+    async listAll() {
+      return { ...profiles };
+    },
+    async healthCheck() {}
   };
 }
 
@@ -155,7 +176,7 @@ async function authenticateAgent(api: ReturnType<typeof request>): Promise<strin
 }
 
 describe("chat flow", () => {
-  const { app } = createApp({ commitReceiptVerifier: createPassingVerifier(), messageStore: createInMemoryMessageStore() });
+  const { app } = createApp({ commitReceiptVerifier: createPassingVerifier(), messageStore: createInMemoryMessageStore(), profileStore: createInMemoryProfileStore() });
   const api = request(app);
 
   it("rejects messages without token", async () => {
@@ -228,7 +249,8 @@ describe("chat flow", () => {
     const { app: expiringApp } = createApp({
       challengeTtlMs: 1,
       commitReceiptVerifier: createPassingVerifier(),
-      messageStore: createInMemoryMessageStore()
+      messageStore: createInMemoryMessageStore(),
+      profileStore: createInMemoryProfileStore()
     });
     const expiringApi = request(expiringApp);
 
