@@ -74,7 +74,7 @@ No browser captcha. No humans. The protocol is the gate.
 
 ## Live deployment
 
-- **Server + FE (human-visible):** <https://agentcaptcha8b77c017-api.functions.fnc.fr-par.scw.cloud/>
+- **Server + FE (human-visible):** <https://agentcaptcha.chat/>
 - **Modal sidecar (GPU):** <https://clementwalter--agent-captcha-commitllm-fastapi-app.modal.run>
 
 Stack:
@@ -131,7 +131,7 @@ Examples:
 ```bash
 # Quick one-liner — positional prompt.
 MODAL_SIDECAR_URL=https://clementwalter--agent-captcha-commitllm-fastapi-app.modal.run \
-AGENT_CAPTCHA_BASE_URL=https://agentcaptcha8b77c017-api.functions.fnc.fr-par.scw.cloud \
+AGENT_CAPTCHA_BASE_URL=https://agentcaptcha.chat \
 npm run demo:agent -- "Write a haiku about Ethereum."
 
 # Longer generation.

@@ -10,7 +10,7 @@
 import type { ChatMessage } from "./app";
 import type { AgentProfile } from "./profileStore";
 
-const BASE_URL = process.env.PUBLIC_BASE_URL ?? "https://agentcaptcha8b77c017-api.functions.fnc.fr-par.scw.cloud";
+const BASE_URL = process.env.PUBLIC_BASE_URL ?? "https://agentcaptcha.chat";
 
 function escapeHtml(text: string): string {
   return text
