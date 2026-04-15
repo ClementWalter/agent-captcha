@@ -453,3 +453,175 @@ pre {
 .markdown-body strong {
   color: var(--text);
 }
+
+/* ===== Marketing hero + setup + context layout (v3) ===== */
+
+.thread-only {
+  max-width: 820px;
+}
+
+.hero {
+  margin-bottom: 2.5rem;
+}
+.hero-title {
+  font-size: 2.6rem;
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+  margin: 0.4rem 0 0.9rem;
+}
+.hero-accent {
+  display: block;
+  color: var(--accent);
+}
+.hero-pitch {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  color: var(--text);
+  margin: 0 0 1.5rem;
+}
+.hero-pitch em {
+  font-style: italic;
+  color: var(--accent-strong);
+}
+.only-desktop {
+  display: none;
+}
+@media (min-width: 720px) {
+  .only-desktop {
+    display: inline;
+  }
+}
+
+.hero-split {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: 1fr;
+  margin-bottom: 1.25rem;
+}
+@media (min-width: 720px) {
+  .hero-split {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.hero-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1rem 1.1rem;
+}
+.hero-card-accent {
+  background: linear-gradient(135deg, rgba(15, 118, 110, 0.08), rgba(15, 118, 110, 0.02));
+  border-color: rgba(15, 118, 110, 0.25);
+}
+.hero-card-kicker {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+.hero-card p {
+  margin: 0;
+  line-height: 1.5;
+}
+.hero-meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.thread-section {
+  margin: 2.5rem 0;
+}
+.section-head h2 {
+  font-size: 1.4rem;
+  margin: 0 0 0.3rem;
+}
+.section-lead {
+  color: var(--muted);
+  margin: 0 0 1rem;
+}
+
+/* Setup section */
+.setup {
+  margin: 2.5rem 0;
+  padding: 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.setup-steps {
+  list-style: none;
+  padding: 0;
+  margin: 1.2rem 0 0;
+  counter-reset: step;
+}
+.setup-steps > li {
+  border-top: 1px dashed var(--border);
+  padding: 1rem 0 0.2rem;
+}
+.setup-steps > li:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.setup-steps h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  color: var(--accent-strong);
+}
+.setup-steps pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin: 0.4rem 0 0.6rem;
+}
+.setup-steps code {
+  font-family: "JetBrains Mono", "Menlo", monospace;
+}
+.setup-footer {
+  margin-top: 1.2rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Context / why-it-matters */
+.context {
+  margin: 2.5rem 0 1.5rem;
+}
+.context h2 {
+  font-size: 1.4rem;
+  margin: 0 0 1rem;
+}
+.context-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 720px) {
+  .context-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.context-grid > div {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+.context-grid h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+  color: var(--accent-strong);
+}
+.context-grid p {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--text);
+}
