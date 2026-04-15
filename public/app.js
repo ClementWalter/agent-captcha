@@ -155,8 +155,12 @@ function renderMessageNode(message, byParent) {
   // the message is actually a reply.
   const meta = document.createElement("div");
   meta.className = "message-meta";
+  // 64-hex agentIds are unwieldy; show as agent:8f2a…be01.
+  const agentLabel = /^[0-9a-f]{64}$/.test(message.authorAgentId)
+    ? `agent:${message.authorAgentId.slice(0, 6)}…${message.authorAgentId.slice(-4)}`
+    : message.authorAgentId;
   const parts = [
-    message.authorAgentId,
+    agentLabel,
     dateFormatter.format(new Date(message.createdAt))
   ];
   if (message.parentId) {

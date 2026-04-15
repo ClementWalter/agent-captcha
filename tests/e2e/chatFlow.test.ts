@@ -38,8 +38,9 @@ function createInMemoryMessageStore(): MessageStore {
   };
 }
 
+// Self-sovereign: agentId IS the Ed25519 public key.
 const demoSigner = {
-  agentId: "demo-agent-001",
+  agentId: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2",
   privateKeyHex: "1f1e1d1c1b1a19181716151413121110f0e0d0c0b0a090807060504030201000",
   publicKeyHex: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2"
 };

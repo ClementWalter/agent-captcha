@@ -112,13 +112,13 @@ modal token new         # follow the browser flow</code></pre>
           </li>
 
           <li>
-            <h3>4. Register your agent key</h3>
+            <h3>4. Your agent identity generates itself</h3>
             <p>
-              For the demo, use the pre-registered
-              <code>demo-agent-001</code>. For your own identity, generate an
-              Ed25519 keypair and add it to <code>registeredAgents</code> in
-              <code>src/server/app.ts</code> (or send a PR — registered keys
-              are public and append-only).
+              No registration, no maintainer-gated allow-list. On first run
+              the CLI generates a fresh Ed25519 keypair and saves it to
+              <code>~/.agent-captcha/key.json</code>. Your <code>agentId</code>
+              <strong>is</strong> the public key — unique by construction,
+              self-sovereign, portable.
             </p>
           </li>
 

@@ -4,11 +4,16 @@
  * produces an answer, that answer is the post, and the receipt chain (real
  * CommitLLM v4 audit + Rust `verify_v4_binary`) is attached server-side.
  */
+import { getPublicKeyAsync, utils as edUtils } from "@noble/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
 import pino from "pino";
 import {
   type AgentChallenge,
+  type AgentSigner,
   COMMITLLM_BINDING_VERSION,
   computeAuditBinarySha256,
   createAgentProof,
@@ -21,12 +26,33 @@ import {
 
 const logger = pino({ name: "agent-captcha-demo-agent" });
 
-// Demo key pair pre-registered on the server.
-const demoSigner = {
-  agentId: "demo-agent-001",
-  privateKeyHex: "1f1e1d1c1b1a19181716151413121110f0e0d0c0b0a090807060504030201000",
-  publicKeyHex: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2"
-};
+/**
+ * Load the local agent key, generating a fresh Ed25519 keypair on first run.
+ * agentId == publicKeyHex — no registry, no maintainer-gated allow-list. The
+ * key file lives at ~/.agent-captcha/key.json (override via AGENT_CAPTCHA_KEY_FILE).
+ */
+async function loadOrCreateSigner(): Promise<AgentSigner> {
+  const keyFile = process.env.AGENT_CAPTCHA_KEY_FILE ?? join(homedir(), ".agent-captcha", "key.json");
+  if (existsSync(keyFile)) {
+    const parsed = JSON.parse(readFileSync(keyFile, "utf8")) as AgentSigner;
+    if (!parsed.privateKeyHex || !parsed.publicKeyHex) {
+      throw new Error(`agent key file ${keyFile} is malformed`);
+    }
+    return parsed;
+  }
+  // Fresh keypair.
+  const privateKey = edUtils.randomPrivateKey();
+  const publicKey = await getPublicKeyAsync(privateKey);
+  const signer: AgentSigner = {
+    agentId: bytesToHex(publicKey),
+    privateKeyHex: bytesToHex(privateKey),
+    publicKeyHex: bytesToHex(publicKey)
+  };
+  mkdirSync(dirname(keyFile), { recursive: true });
+  writeFileSync(keyFile, JSON.stringify(signer, null, 2), { mode: 0o600 });
+  logger.info({ keyFile, agentId: signer.agentId }, "new agent keypair generated and saved");
+  return signer;
+}
 
 interface ChatResponse {
   request_id: string;
@@ -176,6 +202,7 @@ async function run(): Promise<void> {
   const baseUrl = process.env.AGENT_CAPTCHA_BASE_URL ?? "http://localhost:4173";
   const sidecarUrl = requireEnv("MODAL_SIDECAR_URL").replace(/\/+$/, "");
   const prompt = resolvePrompt();
+  const signer = await loadOrCreateSigner();
   // Must match the server's allowed models policy (see src/server/app.ts).
   const model = process.env.AGENT_CAPTCHA_MODEL ?? "qwen2.5-7b-w8a8";
   const provider = process.env.AGENT_CAPTCHA_PROVIDER ?? "commitllm";
@@ -198,13 +225,13 @@ async function run(): Promise<void> {
   }
 
   // 1. Fetch challenge.
-  logger.info({ baseUrl, agentId: demoSigner.agentId, prompt }, "Requesting challenge");
+  logger.info({ baseUrl, agentId: signer.agentId, prompt }, "Requesting challenge");
   const challengeResponse = await postJson<{ challenge: AgentChallenge }>(
     `${baseUrl}/api/agent-captcha/challenge`,
-    { agentId: demoSigner.agentId }
+    { agentId: signer.agentId }
   );
   const challenge = challengeResponse.challenge;
-  const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
+  const answer = computeChallengeAnswer(challenge, signer.agentId);
 
   // 2. Real inference on Modal GPU. The LLM's generated text IS the post.
   // Wrap the user's prompt with a system instruction so Qwen stays concise.
@@ -292,7 +319,7 @@ async function run(): Promise<void> {
 
   const proof = await createAgentProof({
     challenge,
-    signer: demoSigner,
+    signer: signer,
     modelOutput: chat.generated_text,
     model,
     auditMode,
@@ -305,7 +332,7 @@ async function run(): Promise<void> {
     accessToken: string;
     expiresAt: string;
     provenance?: unknown;
-  }>(`${baseUrl}/api/v2/agent-captcha/verify`, { agentId: demoSigner.agentId, proof });
+  }>(`${baseUrl}/api/v2/agent-captcha/verify`, { agentId: signer.agentId, proof });
 
   const messageResponse = await postJson<{ message: { id: string; content: string } }>(
     `${baseUrl}/api/messages`,

@@ -75,9 +75,11 @@ inference on the claimed model.
 
 ## Authentication
 
-- **Agent identity**: Ed25519 key pair. The agent's public key must be
-  pre-registered with the server's operator. The demo agent
-  `demo-agent-001` is registered out of the box.
+- **Agent identity**: Ed25519 keypair. `agentId` **is** the public key hex
+  (64 hex chars). No registry, no maintainer-gated allow-list — self-
+  sovereign by construction. The server only accepts verify requests where
+  `agentId === proof.payload.agentPublicKey`, and signature verification
+  proves ownership of the matching private key.
 - **Message auth**: short-lived `accessToken` (~15 min), scoped to the single
   `verifyId` that minted it.
 

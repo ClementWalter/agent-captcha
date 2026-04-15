@@ -21,11 +21,6 @@ import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
 
 const logger = pino({ name: "agent-captcha-api" });
 
-export interface RegisteredAgent {
-  agentId: string;
-  publicKeyHex: string;
-}
-
 /**
  * Receipt metadata surfaced to clients so the thread UI can render
  * cryptographic provenance next to each message. These fields come from the
@@ -81,7 +76,6 @@ export interface AppConfig {
   tokenTtlMs: number;
   accessTokenSecret: string;
   policy: AgentCaptchaPolicy;
-  registeredAgents: RegisteredAgent[];
   commitReceiptVerifier?: CommitReceiptVerifier;
   messageStore?: MessageStore;
 }
@@ -110,12 +104,15 @@ const MIGRATION_CUTOVER_CRITERIA = [
   "versioned verify path (/api/v2/agent-captcha/verify) has successful production traffic"
 ] as const;
 
+// agentId IS the Ed25519 public key (64 hex chars). Self-authenticating: no
+// registry, no maintainer-gated allow-list. Anyone who generates a keypair
+// has a unique agent identity by construction.
 const challengeRequestSchema = z.object({
-  agentId: z.string().min(3).max(120)
+  agentId: z.string().regex(hex64Regex)
 });
 
 const verifyRequestSchema = z.object({
-  agentId: z.string(),
+  agentId: z.string().regex(hex64Regex),
   proof: z.object({
     payload: z.object({
       challengeId: z.string().uuid(),
@@ -210,12 +207,6 @@ const defaultConfig: AppConfig = {
     requiresCommitReceipt: true,
     maxChallengeAgeMs: 20 * 60 * 1000
   },
-  registeredAgents: [
-    {
-      agentId: "demo-agent-001",
-      publicKeyHex: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2"
-    }
-  ]
 };
 
 export function createApp(customConfig?: Partial<AppConfig>): { app: express.Express; config: AppConfig } {
@@ -225,8 +216,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     policy: {
       ...defaultConfig.policy,
       ...customConfig?.policy
-    },
-    registeredAgents: customConfig?.registeredAgents ?? defaultConfig.registeredAgents
+    }
   };
 
   const app = express();
@@ -242,7 +232,6 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       lastVerifyV2At: null
     }
   };
-  const agentMap = new Map(config.registeredAgents.map((entry) => [entry.agentId, entry]));
   const modalSidecarUrl = process.env.MODAL_SIDECAR_URL;
   if (!config.commitReceiptVerifier && !modalSidecarUrl) {
     throw new Error("MODAL_SIDECAR_URL env var is required when no custom commitReceiptVerifier is provided");
@@ -428,10 +417,10 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return res.status(400).json({ error: "invalid_challenge_request" });
     }
 
-    const agent = agentMap.get(parsed.data.agentId);
-    if (!agent) {
-      return res.status(404).json({ error: "unknown_agent" });
-    }
+    // Self-sovereign identity: agentId is the Ed25519 public key itself.
+    // We issue a challenge to anyone whose id is well-formed; the verify
+    // step later requires the holder to sign with the matching private key.
+    const agentId = parsed.data.agentId;
 
     const now = new Date();
     const challenge: AgentChallenge = {
@@ -444,7 +433,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
 
     state.challenges.set(challenge.challengeId, {
       challenge,
-      expectedAgentId: agent.agentId,
+      expectedAgentId: agentId,
       consumed: false
     });
 
@@ -506,14 +495,11 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return;
     }
 
-    const registered = agentMap.get(payload.agentId);
-    if (!registered) {
-      res.status(404).json({ error: "unknown_agent" });
-      return;
-    }
-
-    if (registered.publicKeyHex !== payload.proof.payload.agentPublicKey) {
-      res.status(400).json({ error: "agent_public_key_mismatch" });
+    // Self-sovereign: agentId MUST equal the public key carried in the proof.
+    // Anyone who controls the matching private key (proved by signature
+    // verification inside verifyAgentProof below) has proved ownership.
+    if (payload.agentId !== payload.proof.payload.agentPublicKey) {
+      res.status(400).json({ error: "agent_id_not_public_key" });
       return;
     }
 

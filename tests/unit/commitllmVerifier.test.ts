@@ -16,7 +16,7 @@ import {
 import { loadCommitLLMFixture } from "../fixtures/commitllmFixture";
 
 const challengeId = "11111111-1111-4111-8111-111111111111";
-const answer = "a869260b0ef754a9663330557a06f0499638e854cf73f274fcb62a0d05a19be0";
+const answer = "4407d1437faaaef4076157f42119b9d34ea1d394bc3dfea40629e592999ea770";
 const modelOutputHash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
 function buildReceipt(overrides?: Partial<CommitLLMReceipt>): CommitLLMReceipt {
@@ -72,7 +72,7 @@ function buildExpected(receipt: CommitLLMReceipt) {
     bindingVersion: COMMITLLM_BINDING_VERSION,
     auditBinarySha256: receipt.artifacts.auditBinarySha256 ?? fixture.auditBinarySha256,
     verifierKeySha256: receipt.artifacts.verifierKeySha256 ?? fixture.verifierKeySha256,
-    agentId: "demo-agent-001",
+    agentId: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2",
     answer
   };
 }
