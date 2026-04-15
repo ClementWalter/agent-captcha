@@ -187,10 +187,12 @@ describe("commitllm modal verifier", () => {
   });
 
   it("rejects malformed audit binary base64 without running the sidecar", async () => {
+    const fixture = loadCommitLLMFixture();
     const receipt = buildReceipt({
       artifacts: {
         auditBinaryBase64: "not-base64%%%",
-        verifierKeyJson: loadCommitLLMFixture().verifierKeyJson
+        verifierKeyJson: fixture.verifierKeyJson,
+        verifierKeySha256: fixture.verifierKeySha256
       }
     });
     let called = false;

@@ -35,6 +35,28 @@ async function main(): Promise<void> {
   app.listen(port, () => {
     logger.info({ port }, "agent-captcha demo API listening");
   });
+
+  // Keep the Modal CommitLLM sidecar warm during launch windows. Modal's
+  // scaledown_window is 5 min — pinging /health every 4 min keeps the
+  // container alive without invoking the GPU path. Disable by setting
+  // MODAL_KEEPWARM_DISABLE=1 once the launch spike passes.
+  const sidecarUrl = process.env.MODAL_SIDECAR_URL;
+  if (sidecarUrl && process.env.MODAL_KEEPWARM_DISABLE !== "1") {
+    const tick = async () => {
+      try {
+        const response = await fetch(`${sidecarUrl.replace(/\/+$/, "")}/health`, {
+          signal: AbortSignal.timeout(10_000)
+        });
+        if (!response.ok) {
+          logger.warn({ status: response.status }, "modal keep-warm non-200");
+        }
+      } catch (error) {
+        logger.warn({ err: error }, "modal keep-warm ping failed");
+      }
+    };
+    void tick();
+    setInterval(tick, 4 * 60 * 1000);
+  }
 }
 
 main().catch((error) => {

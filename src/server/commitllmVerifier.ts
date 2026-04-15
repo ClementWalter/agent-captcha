@@ -83,7 +83,7 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       agentId: string;
       answer: string;
     }
-  ): Promise<{ valid: boolean; reason?: string }> {
+  ): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }> {
     // Shape checks: keep these local so we never round-trip to Modal for
     // obviously-wrong receipts.
     if (receipt.challengeId !== expected.challengeId) {

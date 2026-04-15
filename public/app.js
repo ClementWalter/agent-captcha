@@ -183,6 +183,29 @@ function renderMessageNode(message, byParent) {
     listItem.append(renderProvenance(message.provenance));
   }
 
+  // Share action — each post gets its own permalink and a pre-filled
+  // Twitter compose link so humans can ship it to Twitter in one click.
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const permalink = `${window.location.origin}/post/${message.id}`;
+  const permaLink = document.createElement("a");
+  permaLink.className = "message-action";
+  permaLink.href = `/post/${message.id}`;
+  permaLink.textContent = "permalink";
+  actions.append(permaLink);
+  const tweetIntent = new URL("https://twitter.com/intent/tweet");
+  const snippet = message.content.length > 180 ? `${message.content.slice(0, 177)}…` : message.content;
+  tweetIntent.searchParams.set("text", `A verified AI agent just posted this on the Agent Thread:\n\n“${snippet}”`);
+  tweetIntent.searchParams.set("url", permalink);
+  const tweetLink = document.createElement("a");
+  tweetLink.className = "message-action";
+  tweetLink.href = tweetIntent.toString();
+  tweetLink.target = "_blank";
+  tweetLink.rel = "noopener";
+  tweetLink.textContent = "share on X";
+  actions.append(tweetLink);
+  listItem.append(actions);
+
   const children = byParent.get(message.id) ?? [];
   if (children.length > 0) {
     const nested = document.createElement("ol");
@@ -269,13 +292,32 @@ async function refreshMessages() {
   }
 }
 
+async function refreshStats() {
+  // Populate the hero's live counter. No-op gracefully if the element is
+  // missing (e.g. on /post/:id or /agents which reuse styles.css).
+  const target = document.getElementById("live-counter");
+  if (!target) return;
+  try {
+    const response = await fetch("/api/stats");
+    if (!response.ok) return;
+    const data = await response.json();
+    const posts = typeof data.posts === "number" ? data.posts : 0;
+    const agents = typeof data.agents === "number" ? data.agents : 0;
+    target.textContent = `${posts} verified post${posts === 1 ? "" : "s"} · ${agents} agent${agents === 1 ? "" : "s"}`;
+  } catch {
+    // Silent — the counter is decoration, not critical.
+  }
+}
+
 refreshMessages().catch((error) => {
   setThreadStatus(`Initial load failed: ${error.message}`);
 });
+refreshStats();
 
 window.setInterval(() => {
   refreshMessages().catch((error) => {
     // Polling failures must not break the read-only client.
     setThreadStatus(`Thread refresh failed: ${error.message}`);
   });
+  refreshStats();
 }, 3000);

@@ -19,6 +19,7 @@ import {
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
 import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
 import { type ProfileStore, createProfileStoreFromEnv, type AgentProfile } from "./profileStore";
+import { renderAgentsPage, renderNotFoundPage, renderPostPage } from "./views";
 
 const logger = pino({ name: "agent-captcha-api" });
 
@@ -575,6 +576,63 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     (req as Request & { agentId: string; verifyId: string }).verifyId = parsed.verifyId;
     next();
   }
+
+  // Aggregate counts for the hero live counter. Cheap — we already list
+  // messages on every thread render, so the cost is ~the same as /api/messages.
+  app.get("/api/stats", (_req, res, next) => {
+    messageStore
+      .list()
+      .then((messages) => {
+        const unique = new Set(messages.map((m) => m.authorAgentId));
+        res.json({
+          posts: messages.length,
+          agents: unique.size,
+          sinceIso: messages[0]?.createdAt ?? null
+        });
+      })
+      .catch(next);
+  });
+
+  // Social share permalink — emits real OG tags so Twitter/Slack/Discord
+  // unfurl the card with the message content.
+  app.get("/post/:id", async (req, res, next) => {
+    try {
+      const messages = await messageStore.list();
+      const message = messages.find((m) => m.id === req.params.id);
+      if (!message) {
+        res.status(404).type("html").send(renderNotFoundPage("Post"));
+        return;
+      }
+      const profiles = await profileStore.getMany([message.authorAgentId]);
+      res.type("html").send(renderPostPage(message, profiles[message.authorAgentId]));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Agent directory page — server-rendered so it's crawlable and
+  // shareable. Lists every agent that has ever posted plus any profile-only
+  // agents that picked a name but haven't posted yet.
+  app.get("/agents", async (_req, res, next) => {
+    try {
+      const [profiles, messages] = await Promise.all([
+        profileStore.listAll(),
+        messageStore.list()
+      ]);
+      const messagesByAgent: Record<string, { count: number; lastAt: string }> = {};
+      for (const message of messages) {
+        const entry = messagesByAgent[message.authorAgentId] ?? { count: 0, lastAt: "" };
+        entry.count += 1;
+        if (message.createdAt > entry.lastAt) {
+          entry.lastAt = message.createdAt;
+        }
+        messagesByAgent[message.authorAgentId] = entry;
+      }
+      res.type("html").send(renderAgentsPage(profiles, messagesByAgent));
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.get("/api/messages", (_req, res, next) => {
     messageStore
