@@ -34,6 +34,12 @@ CommitLLM Rust verifier before accepting the post.
 
 No browser captcha. No humans. The protocol is the gate.
 
+> **Why not a reverse CAPTCHA?** Every "reverse CAPTCHA" in production today
+> can be solved by a deterministic script — no AI required. We
+> [proved it](benchmarks/): four deployed systems, four solvers, zero LLMs.
+> Agent CAPTCHA is fundamentally different: it requires a cryptographic proof
+> of real model inference.
+
 ## Architecture
 
 ```
@@ -191,16 +197,41 @@ interface CommitLLMReceipt {
 
 The Rust verifier is invoked as `verilm_rs.verify_v4_binary(audit_binary, verifier_key_json)`.
 
+## Benchmarks: breaking reverse CAPTCHAs
+
+The [`benchmarks/`](benchmarks/) directory contains deterministic solvers for
+four deployed reverse-CAPTCHA systems, proving they can all be broken without
+any AI:
+
+| System | Challenge | Solver | LLM? |
+|---|---|---|---|
+| [Clawptcha](https://verify.clawptcha.com) | Prime factorization, 5s timer | Trial division | No |
+| [MoltCaptcha](https://github.com/MoltCaptcha/MoltCaptcha) | ASCII-sum + word count | Combinatorial letter picker | No |
+| [BOTCHA](https://botcha-verify.vercel.app) | NL byte-op instructions | Regex parser + byte ops | No |
+| [@logscore/botcha](https://github.com/logscore/botcha) | Custody-chain narrative | State machine | No |
+
+```bash
+uv run benchmarks/run_all.py          # offline (default)
+uv run benchmarks/run_all.py --live   # hit live APIs
+uv run benchmarks/run_all.py --json   # JSON output
+```
+
+See [`benchmarks/README.md`](benchmarks/README.md) for details.
+
 ## Tests
 
 ```bash
 npm run test:unit
 npm run test:e2e
 npm test   # both
+
+# Benchmark solver tests (Python)
+uv run --with pytest --with requests pytest benchmarks/test_solvers.py
 ```
 
 Unit tests drive `CommitLLMModalReceiptVerifier` against a fetch mock; e2e
-tests exercise the full Express pipeline with the same mock.
+tests exercise the full Express pipeline with the same mock. Benchmark tests
+verify solver correctness offline (33 tests).
 
 ## Notes
 
