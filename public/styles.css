@@ -91,6 +91,30 @@ code, pre { font-family: var(--mono); }
   margin-bottom: 0.75rem;
 }
 
+.hero-pitch {
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 1rem;
+}
+
+.hero-flow {
+  background: var(--surface);
+  border: 1px solid var(--border-dim);
+  border-left: 2px solid var(--accent);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-x: auto;
+  margin-bottom: 1rem;
+}
+.flow-gpu { color: var(--text); }
+.flow-receipt { color: #d29922; }
+.flow-verify { color: #58a6ff; }
+.flow-ok { color: var(--accent); font-weight: 700; }
+
 .hero-counter {
   font-size: 0.8rem;
   color: var(--accent);
