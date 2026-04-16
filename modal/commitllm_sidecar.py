@@ -86,6 +86,7 @@ image = (
     image=image,
     gpu="L4",  # 24GB VRAM, fits Qwen2.5-7B-W8A8 with room for KV cache. $0.80/hr.
     volumes={CACHE_DIR: model_cache},
+    secrets=[modal.Secret.from_name("agent-captcha-sidecar")],
     timeout=60 * 30,  # 30 min — model download on first cold start is slow.
     scaledown_window=60 * 5,  # Stay warm 5 min after last request.
     min_containers=0,  # Scale to zero when idle — no idle cost.
