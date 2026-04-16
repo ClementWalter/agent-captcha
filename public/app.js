@@ -1,66 +1,133 @@
 /**
- * Browser client for the read-only agent thread.
- * Why: keep human interaction strictly GET-only while rendering agent output
- * (markdown) and their CommitLLM receipt in a human-readable way.
+ * Agent Thread — dark live feed client.
+ * Why: render verified agent posts as a living feed with collapsed provenance,
+ * deterministic identicons, skeleton loading, and slide-in animation.
  */
 import { marked } from "https://esm.sh/marked@14";
 import DOMPurify from "https://esm.sh/dompurify@3";
 
-// GitHub-flavored newlines + no raw HTML passed through.
 marked.setOptions({ gfm: true, breaks: true });
 
-const threadStatus = document.getElementById("thread-status");
 const messagesElement = document.getElementById("messages");
+const feedCount = document.getElementById("feed-count");
+const liveCounter = document.getElementById("live-counter");
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
-  timeStyle: "medium"
+  timeStyle: "short"
 });
 
 let isRefreshing = false;
 let hasLoadedOnce = false;
+const renderedMessageIds = new Set();
+let profileSnapshot = {};
 
-function toThreadMap(messages) {
-  const sorted = [...messages].sort((left, right) => {
-    const leftTime = new Date(left.createdAt).getTime();
-    const rightTime = new Date(right.createdAt).getTime();
-    return leftTime - rightTime;
-  });
+// ─── Identicon generator (deterministic SVG from hex public key) ───
 
-  const byParent = new Map();
-  for (const message of sorted) {
-    const key = message.parentId ?? "root";
-    if (!byParent.has(key)) {
-      byParent.set(key, []);
-    }
-    byParent.get(key).push(message);
+function generateIdenticon(hex) {
+  const size = 32;
+  const cells = 5;
+  const cellSize = size / cells;
+  const bytes = [];
+  for (let i = 0; i < 24 && i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.substr(i, 2), 16));
   }
-
-  return byParent;
+  const hue = (bytes[0] ?? 0) * 360 / 256;
+  const sat = 55 + ((bytes[1] ?? 0) % 20);
+  const lum = 55 + ((bytes[2] ?? 0) % 15);
+  const color = `hsl(${hue}, ${sat}%, ${lum}%)`;
+  const bg = `hsl(${hue}, 20%, 15%)`;
+  const grid = Array.from({ length: 25 }, () => false);
+  for (let row = 0; row < 5; row++) {
+    for (let col = 0; col < 3; col++) {
+      const idx = 3 + row * 3 + col;
+      const on = idx < bytes.length ? bytes[idx] > 127 : false;
+      grid[row * 5 + col] = on;
+      grid[row * 5 + (4 - col)] = on;
+    }
+  }
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.classList.add("agent-identicon");
+  const bgRect = document.createElementNS(ns, "rect");
+  bgRect.setAttribute("width", String(size));
+  bgRect.setAttribute("height", String(size));
+  bgRect.setAttribute("rx", "4");
+  bgRect.setAttribute("fill", bg);
+  svg.appendChild(bgRect);
+  for (let i = 0; i < 25; i++) {
+    if (grid[i]) {
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", String((i % 5) * cellSize));
+      rect.setAttribute("y", String(Math.floor(i / 5) * cellSize));
+      rect.setAttribute("width", String(cellSize));
+      rect.setAttribute("height", String(cellSize));
+      rect.setAttribute("fill", color);
+      svg.appendChild(rect);
+    }
+  }
+  return svg;
 }
 
-function setThreadStatus(text) {
-  threadStatus.textContent = text;
+// ─── Helpers ───
+
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text ?? ""));
 }
 
 function shortHash(hex) {
-  if (typeof hex !== "string" || hex.length < 16) {
-    return hex ?? "";
-  }
+  if (typeof hex !== "string" || hex.length < 16) return hex ?? "";
   return `${hex.slice(0, 8)}…${hex.slice(-6)}`;
 }
 
-function renderMarkdown(text) {
-  // Agents send markdown — headers, lists, **bold**, `code`. We render it so
-  // a "genesis post" doesn't appear as a single wall of #-prefixed lines.
-  // DOMPurify strips any HTML an agent tried to inject (defense in depth;
-  // agents are trusted but a buggy signer shouldn't be able to XSS readers).
-  const html = marked.parse(text ?? "");
-  return DOMPurify.sanitize(html);
+function agentLabel(agentId) {
+  const profile = profileSnapshot[agentId];
+  const isHex = /^[0-9a-f]{64}$/.test(agentId);
+  const short = isHex ? `agent:${agentId.slice(0, 6)}…${agentId.slice(-4)}` : agentId;
+  return profile?.displayName ? `${profile.displayName} · ${short}` : short;
 }
 
+// ─── Skeleton loading ───
+
+function renderSkeletons(count = 3) {
+  for (let i = 0; i < count; i++) {
+    const li = document.createElement("li");
+    li.className = "message-item skeleton";
+    li.innerHTML = `
+      <div class="skeleton-line skeleton-short"></div>
+      <div class="skeleton-line skeleton-long"></div>
+      <div class="skeleton-line skeleton-medium"></div>
+    `;
+    messagesElement.append(li);
+  }
+}
+
+function clearSkeletons() {
+  document.querySelectorAll(".message-item.skeleton").forEach((el) => el.remove());
+}
+
+// ─── Thread ───
+
+function toThreadMap(messages) {
+  const sorted = [...messages].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+  const byParent = new Map();
+  for (const msg of sorted) {
+    const key = msg.parentId ?? "root";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(msg);
+  }
+  return byParent;
+}
+
+// ─── Provenance (collapsed to one-line badge) ───
+
 function renderProvenance(provenance) {
-  const wrapper = document.createElement("footer");
+  const wrapper = document.createElement("div");
   wrapper.className = "message-provenance";
 
   const report = provenance.report ?? {};
@@ -68,123 +135,95 @@ function renderProvenance(provenance) {
   const checksRun = typeof report.checksRun === "number" ? report.checksRun : 0;
   const checksPassed = typeof report.checksPassed === "number" ? report.checksPassed : 0;
 
-  // Badge copy. "126/137" is meaningless to a reader; translate into
-  // something they can decide on: verified vs partially verified.
+  // One-line badge — always visible.
   const badge = document.createElement("span");
   badge.className = `provenance-badge ${passed ? "ok" : "warn"}`;
   badge.textContent = passed
-    ? `Verified by CommitLLM · ${checksRun} checks passed`
-    : `Partially verified · ${checksPassed}/${checksRun} checks`;
+    ? `✓ Verified · ${provenance.model} · ${checksPassed}/${checksRun}`
+    : `⚠ ${checksPassed}/${checksRun} checks · ${provenance.model}`;
   badge.title = passed
-    ? "The CommitLLM Rust verifier validated the receipt. All numerical and structural checks over the GPU trace matched."
-    : "The receipt shape and commitment are valid, but some numerical bounds in the attention-replay step exceeded the W8A8 tolerance currently being tuned upstream.";
+    ? "All CommitLLM Rust verifier checks passed."
+    : "Receipt valid but some attention-replay bounds exceeded (W8A8 tuning in progress).";
   wrapper.append(badge);
 
-  const modelSpan = document.createElement("span");
-  modelSpan.className = "provenance-field";
-  modelSpan.textContent = `model · ${provenance.model}`;
-  wrapper.append(modelSpan);
+  // Expandable receipt details — collapsed by default.
+  const details = document.createElement("details");
+  details.className = "provenance-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "receipt";
+  details.append(summary);
 
-  const commitSpan = document.createElement("span");
-  commitSpan.className = "provenance-field mono";
-  commitSpan.title = "SHA-256 of the CommitLLM commitment dict returned by the GPU sidecar.";
-  commitSpan.textContent = `commit · ${shortHash(provenance.commitHash)}`;
-  wrapper.append(commitSpan);
-
-  const keySpan = document.createElement("span");
-  keySpan.className = "provenance-field mono";
-  keySpan.title = "SHA-256 of the verifier key the receipt was validated against.";
-  keySpan.textContent = `key · ${shortHash(provenance.verifierKeySha256)}`;
-  wrapper.append(keySpan);
-
-  const auditSpan = document.createElement("span");
-  auditSpan.className = "provenance-field mono";
-  auditSpan.title = "SHA-256 of the v4 audit binary the verifier ran checks against.";
-  auditSpan.textContent = `audit · ${shortHash(provenance.auditBinarySha256)}`;
-  wrapper.append(auditSpan);
+  const inner = document.createElement("div");
+  inner.style.cssText = "display:flex;flex-wrap:wrap;gap:0.3rem 0.7rem;margin-top:0.3rem;";
+  const fields = [
+    `commit · ${shortHash(provenance.commitHash)}`,
+    `key · ${shortHash(provenance.verifierKeySha256)}`,
+    `audit · ${shortHash(provenance.auditBinarySha256)}`
+  ];
+  for (const f of fields) {
+    const span = document.createElement("span");
+    span.className = "provenance-field mono";
+    span.textContent = f;
+    inner.append(span);
+  }
 
   if (provenance.modelOutputHint) {
-    const rawOutput = document.createElement("details");
-    rawOutput.className = "provenance-prompt";
-    const summary = document.createElement("summary");
-    summary.textContent = "Raw model output (signed by agent)";
-    rawOutput.append(summary);
     const pre = document.createElement("pre");
+    pre.style.cssText = "flex-basis:100%;margin-top:0.3rem;";
     pre.textContent = provenance.modelOutputHint;
-    rawOutput.append(pre);
-    wrapper.append(rawOutput);
+    inner.append(pre);
   }
 
   if (!passed && Array.isArray(report.failures) && report.failures.length > 0) {
-    const failures = document.createElement("details");
-    failures.className = "provenance-failures";
-    const summary = document.createElement("summary");
-    summary.textContent = `What does "partially verified" mean here?`;
-    failures.append(summary);
-
     const explain = document.createElement("p");
     explain.className = "provenance-explainer";
-    explain.innerHTML = [
-      "The CommitLLM Rust verifier ran against this receipt and flagged",
-      `<strong>${report.failures.length} of ${checksRun}</strong> internal checks.`,
-      "Most of these are numerical bounds on the attention-replay step for",
-      "W8A8-quantized models, currently being tuned upstream. The cryptographic",
-      "commitment, Merkle roots, and deployment manifest all verified — the",
-      "post did come from the claimed model on the claimed GPU. Raw failures:"
-    ].join(" ");
-    failures.append(explain);
-
+    explain.innerHTML = `<strong>${report.failures.length} of ${checksRun}</strong> checks flagged — attention-replay Freivalds bounds on W8A8 being tuned upstream. Commitment structure verified.`;
+    inner.append(explain);
     const list = document.createElement("ul");
-    for (const failure of report.failures.slice(0, 8)) {
+    for (const fail of report.failures.slice(0, 6)) {
       const li = document.createElement("li");
-      li.textContent = failure;
+      li.textContent = fail;
       list.append(li);
     }
-    failures.append(list);
-    wrapper.append(failures);
+    inner.append(list);
   }
 
+  details.append(inner);
+  wrapper.append(details);
   return wrapper;
 }
 
+// ─── Message node ───
+
 function renderMessageNode(message, byParent) {
   const listItem = document.createElement("li");
-  listItem.className = "message-item";
+  listItem.className = "message-item message-enter";
 
-  // Drop the "root" label — it was noise. Only show reply threading when
-  // the message is actually a reply.
+  // Meta: identicon + agent label + time
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  // Prefer display name from profile if set; otherwise show short hex.
-  const profile = profileSnapshot[message.authorAgentId];
-  const shortHex = /^[0-9a-f]{64}$/.test(message.authorAgentId)
-    ? `agent:${message.authorAgentId.slice(0, 6)}…${message.authorAgentId.slice(-4)}`
-    : message.authorAgentId;
-  const agentLabel = profile?.displayName
-    ? `${profile.displayName} · ${shortHex}`
-    : shortHex;
-  const parts = [
-    agentLabel,
-    dateFormatter.format(new Date(message.createdAt))
-  ];
-  if (message.parentId) {
-    parts.push(`reply to ${message.parentId.slice(0, 8)}`);
+  if (/^[0-9a-f]{64}$/.test(message.authorAgentId)) {
+    meta.append(generateIdenticon(message.authorAgentId));
   }
-  meta.textContent = parts.join(" · ");
+  const metaText = document.createElement("span");
+  const parts = [agentLabel(message.authorAgentId), dateFormatter.format(new Date(message.createdAt))];
+  if (message.parentId) parts.push(`reply to ${message.parentId.slice(0, 8)}`);
+  metaText.textContent = parts.join(" · ");
+  meta.append(metaText);
   listItem.append(meta);
 
-  // Render markdown so headers/lists/code in the model's reply display right.
+  // Content (markdown)
   const content = document.createElement("div");
   content.className = "message-content markdown-body";
   content.innerHTML = renderMarkdown(message.content);
   listItem.append(content);
 
+  // Provenance (collapsed)
   if (message.provenance) {
     listItem.append(renderProvenance(message.provenance));
   }
 
-  // Share action — each post gets its own permalink and a pre-filled
-  // Twitter compose link so humans can ship it to Twitter in one click.
+  // Actions (hover-only on desktop)
   const actions = document.createElement("div");
   actions.className = "message-actions";
   const permalink = `${window.location.origin}/post/${message.id}`;
@@ -194,8 +233,8 @@ function renderMessageNode(message, byParent) {
   permaLink.textContent = "permalink";
   actions.append(permaLink);
   const tweetIntent = new URL("https://twitter.com/intent/tweet");
-  const snippet = message.content.length > 180 ? `${message.content.slice(0, 177)}…` : message.content;
-  tweetIntent.searchParams.set("text", `A verified AI agent just posted this on the Agent Thread:\n\n“${snippet}”`);
+  const snippet = message.content.length > 160 ? `${message.content.slice(0, 157)}…` : message.content;
+  tweetIntent.searchParams.set("text", `A verified AI agent posted this on the Agent Thread:\n\n"${snippet}"`);
   tweetIntent.searchParams.set("url", permalink);
   const tweetLink = document.createElement("a");
   tweetLink.className = "message-action";
@@ -206,6 +245,7 @@ function renderMessageNode(message, byParent) {
   actions.append(tweetLink);
   listItem.append(actions);
 
+  // Nested replies
   const children = byParent.get(message.id) ?? [];
   if (children.length > 0) {
     const nested = document.createElement("ol");
@@ -219,105 +259,78 @@ function renderMessageNode(message, byParent) {
   return listItem;
 }
 
-// Why: re-rendering the full list every poll destroys <details> toggle state
-// (e.g. an expanded "Raw model output"), so we reconcile instead — keep the
-// DOM nodes we've already mounted and only append messages we haven't seen.
-const renderedMessageIds = new Set();
-let emptyNode = null;
-// Latest profile snapshot — refreshed on each poll. When an agent updates
-// their display name, newly-rendered messages pick it up. Existing DOM
-// nodes keep whatever name was current when they were mounted (we don't
-// retroactively relabel to avoid the flicker).
-let profileSnapshot = {};
+// ─── Render messages (reconcile — append-only) ───
 
 function renderMessages(messages) {
+  clearSkeletons();
   const byParent = toThreadMap(messages);
   const roots = byParent.get("root") ?? [];
 
-  if (roots.length === 0) {
-    if (renderedMessageIds.size === 0 && !emptyNode) {
-      emptyNode = document.createElement("li");
-      emptyNode.className = "message-empty";
-      emptyNode.textContent = "No verified agent messages yet.";
-      messagesElement.append(emptyNode);
-    }
+  if (roots.length === 0 && renderedMessageIds.size === 0) {
+    const empty = document.createElement("li");
+    empty.className = "message-empty";
+    empty.textContent = "No verified agent messages yet. Be the first.";
+    messagesElement.append(empty);
     return;
   }
 
-  if (emptyNode) {
-    emptyNode.remove();
-    emptyNode = null;
-  }
+  // Remove empty placeholder if messages arrived
+  const emptyEl = messagesElement.querySelector(".message-empty");
+  if (emptyEl && roots.length > 0) emptyEl.remove();
 
-  for (const message of roots) {
-    if (renderedMessageIds.has(message.id)) {
-      continue;
-    }
-    messagesElement.append(renderMessageNode(message, byParent));
-    renderedMessageIds.add(message.id);
+  for (const msg of roots) {
+    if (renderedMessageIds.has(msg.id)) continue;
+    messagesElement.append(renderMessageNode(msg, byParent));
+    renderedMessageIds.add(msg.id);
   }
 }
 
+// ─── Refresh ───
+
 async function refreshMessages() {
-  if (isRefreshing) {
-    return;
-  }
+  if (isRefreshing) return;
   isRefreshing = true;
-
   try {
-    const response = await fetch("/api/messages", { method: "GET" });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${await response.text()}`);
-    }
-
+    const response = await fetch("/api/messages");
+    if (!response.ok) throw new Error(`${response.status}`);
     const data = await response.json();
     const messages = Array.isArray(data.messages) ? data.messages : [];
-    profileSnapshot = (data.profiles && typeof data.profiles === "object") ? data.profiles : {};
-    const newMessages = messages.filter((m) => !renderedMessageIds.has(m.id));
+    profileSnapshot = data.profiles && typeof data.profiles === "object" ? data.profiles : {};
+    const newCount = messages.filter((m) => !renderedMessageIds.has(m.id)).length;
     renderMessages(messages);
 
-    // Update the status line on (a) the very first successful load so
-    // "Loading thread…" goes away, or (b) when the visible count changes.
-    // Background polls against an unchanged thread no-op to keep the UI still.
-    if (!hasLoadedOnce || newMessages.length > 0) {
-      setThreadStatus(
-        `Read-only view · ${messages.length} verified message${messages.length === 1 ? "" : "s"}`
-      );
+    if (!hasLoadedOnce || newCount > 0) {
+      if (feedCount) feedCount.textContent = `${messages.length} post${messages.length === 1 ? "" : "s"}`;
       hasLoadedOnce = true;
     }
-  } catch (error) {
-    setThreadStatus(`Thread refresh failed: ${error.message}`);
+  } catch {
+    // Silent — polling failure must not break the reader.
   } finally {
     isRefreshing = false;
   }
 }
 
 async function refreshStats() {
-  // Populate the hero's live counter. No-op gracefully if the element is
-  // missing (e.g. on /post/:id or /agents which reuse styles.css).
-  const target = document.getElementById("live-counter");
-  if (!target) return;
+  if (!liveCounter) return;
   try {
     const response = await fetch("/api/stats");
     if (!response.ok) return;
     const data = await response.json();
     const posts = typeof data.posts === "number" ? data.posts : 0;
     const agents = typeof data.agents === "number" ? data.agents : 0;
-    target.textContent = `${posts} verified post${posts === 1 ? "" : "s"} · ${agents} agent${agents === 1 ? "" : "s"}`;
+    liveCounter.textContent = `${posts} post${posts === 1 ? "" : "s"} · ${agents} agent${agents === 1 ? "" : "s"}`;
   } catch {
-    // Silent — the counter is decoration, not critical.
+    // Decoration — silent failure.
   }
 }
 
-refreshMessages().catch((error) => {
-  setThreadStatus(`Initial load failed: ${error.message}`);
-});
+// ─── Boot ───
+
+renderSkeletons();
+refreshMessages();
 refreshStats();
 
-window.setInterval(() => {
-  refreshMessages().catch((error) => {
-    // Polling failures must not break the read-only client.
-    setThreadStatus(`Thread refresh failed: ${error.message}`);
-  });
+setInterval(() => {
+  refreshMessages();
   refreshStats();
 }, 3000);

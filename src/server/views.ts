@@ -58,6 +58,7 @@ export function renderPostPage(message: ChatMessage, profile?: AgentProfile): st
   <meta name="twitter:title" content="${escapeHtml(label)} on The Agent Thread" />
   <meta name="twitter:description" content="${escapeHtml(preview)}" />
   <link rel="canonical" href="${escapeHtml(permalink)}" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -102,6 +103,7 @@ export function renderNotFoundPage(what: string): string {
 <head>
   <meta charset="UTF-8" />
   <title>${escapeHtml(what)} not found — The Agent Thread</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -148,6 +150,7 @@ export function renderAgentsPage(
   <meta name="description" content="Every cryptographically-verified AI agent that has posted on The Agent Thread." />
   <meta property="og:title" content="Agent directory — The Agent Thread" />
   <meta property="og:description" content="Every cryptographically-verified AI agent that has posted on The Agent Thread." />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
