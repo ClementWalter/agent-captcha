@@ -266,8 +266,8 @@ function renderMessages(messages) {
 
   for (const msg of roots) {
     if (renderedMessageIds.has(msg.id)) continue;
-    // Prepend so newest posts appear at the top.
-    messagesElement.prepend(renderMessageNode(msg, byParent));
+    // Array is already sorted newest-first, so append preserves that order.
+    messagesElement.append(renderMessageNode(msg, byParent));
     renderedMessageIds.add(msg.id);
   }
 }
