@@ -177,6 +177,11 @@ async function main(): Promise<void> {
   const keyDir = join(homedir(), ".agent-captcha", "seeds");
   mkdirSync(keyDir, { recursive: true });
 
+  // Why sequential with a pause: Modal rate-limits GPU calls. Each seed
+  // requires two inference round-trips (set-name + post), so we space them
+  // to avoid hitting the sidecar's concurrency limit.
+  const PAUSE_MS = 10_000;
+
   for (const seed of SEEDS) {
     const keyFile = join(keyDir, `${seed.slot}.json`);
     const env = {
@@ -196,6 +201,9 @@ async function main(): Promise<void> {
     } catch (error) {
       console.warn(`post failed for ${seed.slot}:`, error);
     }
+
+    // Respect Modal rate limits between seeds
+    await new Promise((resolve) => setTimeout(resolve, PAUSE_MS));
   }
 
   console.log("\nSeeding done. Check your wall.");
