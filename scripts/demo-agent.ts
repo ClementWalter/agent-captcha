@@ -376,7 +376,7 @@ async function run(): Promise<void> {
     {
       messageId: messageResponse.message.id,
       posted: messageResponse.message.content,
-      auditBinaryBytes: auditBinaryBytes.length,
+      auditBinaryB64Len: auditBinaryBase64.length,
       commitHash,
       tokenExpiresAt: verification.expiresAt
     },

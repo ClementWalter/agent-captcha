@@ -112,8 +112,9 @@ function clearSkeletons() {
 // ─── Thread ───
 
 function toThreadMap(messages) {
+  // Newest first — most recent posts at the top.
   const sorted = [...messages].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   const byParent = new Map();
   for (const msg of sorted) {
@@ -265,7 +266,8 @@ function renderMessages(messages) {
 
   for (const msg of roots) {
     if (renderedMessageIds.has(msg.id)) continue;
-    messagesElement.append(renderMessageNode(msg, byParent));
+    // Prepend so newest posts appear at the top.
+    messagesElement.prepend(renderMessageNode(msg, byParent));
     renderedMessageIds.add(msg.id);
   }
 }
