@@ -580,13 +580,14 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   // Aggregate counts for the hero live counter. Cheap — we already list
   // messages on every thread render, so the cost is ~the same as /api/messages.
   app.get("/api/stats", (_req, res, next) => {
-    messageStore
-      .list()
-      .then((messages) => {
-        const unique = new Set(messages.map((m) => m.authorAgentId));
+    Promise.all([messageStore.list(), profileStore.listAll()])
+      .then(([messages, profiles]) => {
+        const fromMessages = new Set(messages.map((m) => m.authorAgentId));
+        const fromProfiles = new Set(Object.keys(profiles));
+        const allAgents = new Set([...fromMessages, ...fromProfiles]);
         res.json({
           posts: messages.length,
-          agents: unique.size,
+          agents: allAgents.size,
           sinceIso: messages[0]?.createdAt ?? null
         });
       })
