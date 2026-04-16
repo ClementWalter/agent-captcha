@@ -6,7 +6,7 @@
 """MoltCaptcha SMHL solver — breaks Semantic-Mathematical Hybrid Lock without AI.
 
 Target: MoltCaptcha (https://github.com/MoltCaptcha/MoltCaptcha)
-Protocol: Local challenge — not a hosted API.
+Protocol: Local challenge — not a hosted API, Python library only.
 Challenge: creative format + topic + target ASCII sum of first letters + word count.
 Solver:   Brute-force letter combination + filler word bank — instant.
 
@@ -58,7 +58,6 @@ _WORDS: dict[str, list[str]] = {
     "z": ["zinc", "zone", "zeal"],
 }
 
-# All printable ASCII letters for brute-force
 _LETTERS = [chr(c) for c in range(ord("a"), ord("z") + 1)]
 
 
@@ -80,7 +79,6 @@ def _find_letters(target_ascii_sum: int, count: int) -> list[str] | None:
 def _build_line(first_letter: str, word_count: int) -> str:
     """Build a line of `word_count` words, all starting with `first_letter`."""
     words = _WORDS.get(first_letter, [f"{first_letter}word"])
-    # Why: cycle through available words to fill the line
     return " ".join(words[i % len(words)] for i in range(word_count))
 
 
@@ -114,9 +112,7 @@ def solve_smhl(
 # ── Challenge generation (replicates MoltCaptcha's generator) ───────────────
 
 
-def _generate_challenge(
-    rng: random.Random | None = None,
-) -> dict:
+def _generate_challenge(rng: random.Random | None = None) -> dict:
     """Generate a representative SMHL challenge matching MoltCaptcha's format."""
     if rng is None:
         rng = random.Random(42)  # noqa: S311 — deterministic for benchmarks
@@ -139,11 +135,11 @@ def _generate_challenge(
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 
-def solve(*, live: bool = False) -> dict:
-    """Entry point used by run_all.py.
+def solve() -> dict:
+    """Generate a MoltCaptcha SMHL challenge and solve it deterministically.
 
-    MoltCaptcha is not a hosted API, so live and offline are the same:
-    we generate a challenge locally and solve it.
+    MoltCaptcha is a Python library, not a hosted API, so we generate
+    the challenge locally using the same format the library produces.
     """
     t0 = time.perf_counter()
 
@@ -177,7 +173,6 @@ _RESET = "\033[0m"
 
 def main() -> None:
     use_json = "--json" in sys.argv
-
     result = solve()
 
     if use_json:

@@ -810,54 +810,13 @@ def compute_hmac(nonce: str, answer: str) -> str:
     ).hexdigest()
 
 
-# ── Offline mode ────────────────────────────────────────────────────────────
-# Why: self-contained challenge so the benchmark runs without network access.
-
-_OFFLINE_DATA = base64.b64encode(bytes(range(256))).decode()
-_OFFLINE_NONCE = "deadbeef" * 4
-_OFFLINE_INSTRUCTIONS = [
-    (
-        "Compute SHA-256 over the slice in the range [10, 42] (inclusive)."
-        " Return the leading 8 bytes of the hash output."
-    ),
-    (
-        "For each byte in the range [50, 80):"
-        " if the byte is >= 100, XOR it with 200; otherwise XOR it with 55."
-    ),
-    (
-        "Concatenate the raw byte results from all 2 steps in order,"
-        " and return the SHA-256 hex digest of the concatenated bytes."
-    ),
-]
-
-
-def solve_offline() -> dict:
-    """Solve a self-generated challenge locally."""
-    t0 = time.perf_counter()
-    answer, n_instr, n_decoy = solve_challenge(
-        _OFFLINE_DATA, _OFFLINE_NONCE, _OFFLINE_INSTRUCTIONS
-    )
-    elapsed = time.perf_counter() - t0
-
-    # Verify: a 64-char hex string means the parser produced a valid SHA-256
-    passed = len(answer) == 64 and all(c in "0123456789abcdef" for c in answer)
-
-    return {
-        "name": "BOTCHA",
-        "passed": passed,
-        "elapsed": elapsed,
-        "detail": f"instructions={n_instr}, decoys={n_decoy}, no LLM used",
-        "method": "regex parser + byte ops",
-    }
-
-
-# ── Live mode ───────────────────────────────────────────────────────────────
+# ── Live solver ─────────────────────────────────────────────────────────────
 
 _BASE_URL = "https://botcha-verify.vercel.app"
 _MAX_RETRIES = 5
 
 
-def solve_live() -> dict:
+def solve() -> dict:
     """Fetch and solve a live BOTCHA challenge.
 
     Retries up to _MAX_RETRIES times — the instruction set has many wording
@@ -893,18 +852,21 @@ def solve_live() -> dict:
 
             passed = result.get("success", result.get("verified", False))
 
-            return {
-                "name": "BOTCHA",
-                "passed": passed,
-                "elapsed": elapsed,
-                "detail": f"instructions={n_instr}, decoys={n_decoy}, no LLM used",
-                "method": "regex parser + byte ops",
-            }
+            if passed:
+                return {
+                    "name": "BOTCHA",
+                    "passed": True,
+                    "elapsed": elapsed,
+                    "detail": f"instructions={n_instr}, decoys={n_decoy}, no LLM used",
+                    "method": "regex parser + byte ops",
+                }
+            # Wrong answer — retry with a new challenge
+            last_error = result.get("error", "wrong_answer")
         except Exception as exc:
             last_error = str(exc)
-            logger.warning(
-                "BOTCHA attempt %d/%d failed: %s", attempt + 1, _MAX_RETRIES, exc
-            )
+        logger.warning(
+            "BOTCHA attempt %d/%d failed: %s", attempt + 1, _MAX_RETRIES, last_error
+        )
 
     return {
         "name": "BOTCHA",
@@ -915,11 +877,6 @@ def solve_live() -> dict:
     }
 
 
-def solve(*, live: bool = False) -> dict:
-    """Entry point used by run_all.py."""
-    return solve_live() if live else solve_offline()
-
-
 # ── Standalone execution ────────────────────────────────────────────────────
 
 _GREEN = "\033[32m"
@@ -928,10 +885,8 @@ _RESET = "\033[0m"
 
 
 def main() -> None:
-    live = "--live" in sys.argv
     use_json = "--json" in sys.argv
-
-    result = solve(live=live)
+    result = solve()
 
     if use_json:
         print(json.dumps(result, indent=2))  # noqa: T201

@@ -10,14 +10,12 @@ This directory contains solver scripts for four deployed systems.
 ## Run
 
     uv run benchmarks/run_all.py
+    uv run benchmarks/run_all.py --json   # JSON output for CI
 
-For live API verification (hits real endpoints):
+Each script can also run standalone:
 
-    uv run benchmarks/run_all.py --live
-
-JSON output for CI or blog embedding:
-
-    uv run benchmarks/run_all.py --json
+    uv run benchmarks/clawptcha.py
+    uv run benchmarks/botcha.py
 
 ## Results
 
@@ -25,14 +23,15 @@ JSON output for CI or blog embedding:
 |------------------|--------------------------|-------------------------------|------|
 | Clawptcha        | Prime factorization, 5s  | Trial division                | No   |
 | MoltCaptcha      | ASCII-sum + word count   | Combinatorial letter picker   | No   |
-| BOTCHA           | NL byte-op instructions  | word2number + regex + XOR     | No   |
+| BOTCHA           | NL byte-op instructions  | Regex parser + byte ops       | No   |
 | @logscore/botcha | Custody-chain narrative  | State machine                 | No   |
 
 ## Notes
 
-- **Clawptcha** and **BOTCHA** have live APIs. Use `--live` to verify against them.
-- **MoltCaptcha** is a Python library (not a hosted API). We generate a representative
-  challenge and solve it deterministically.
+- **Clawptcha** and **BOTCHA** hit their live APIs — the solvers break the real
+  production systems, not a local mock.
+- **MoltCaptcha** is a Python library (not a hosted API). We generate a
+  representative challenge and solve it deterministically.
 - **@logscore/botcha** is an npm package. We generate a representative challenge
   matching the library's custody-chain format and solve it with a state machine.
 

@@ -9,8 +9,7 @@ Executes each solver and prints a summary table proving that every deployed
 reverse CAPTCHA can be broken by a deterministic script with zero AI.
 
 Usage:
-    uv run benchmarks/run_all.py          # offline mode (default)
-    uv run benchmarks/run_all.py --live   # hit live APIs
+    uv run benchmarks/run_all.py          # run all solvers
     uv run benchmarks/run_all.py --json   # output as JSON
 """
 
@@ -67,12 +66,12 @@ _LABELS = {
 }
 
 
-def run_all(*, live: bool = False) -> list[dict]:
+def run_all() -> list[dict]:
     """Run all solvers and return results."""
     results = []
     for name, solver in _SOLVERS:
         try:
-            result = solver(live=live)
+            result = solver()
         except Exception:
             logger.exception("Solver %s failed", name)
             result = {
@@ -127,10 +126,9 @@ def _print_table(results: list[dict]) -> None:
 
 
 def main() -> None:
-    live = "--live" in sys.argv
     use_json = "--json" in sys.argv
 
-    results = run_all(live=live)
+    results = run_all()
 
     if use_json:
         print(json.dumps(results, indent=2))  # noqa: T201

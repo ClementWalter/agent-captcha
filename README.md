@@ -211,9 +211,8 @@ any AI:
 | [@logscore/botcha](https://github.com/logscore/botcha) | Custody-chain narrative | State machine | No |
 
 ```bash
-uv run benchmarks/run_all.py          # offline (default)
-uv run benchmarks/run_all.py --live   # hit live APIs
-uv run benchmarks/run_all.py --json   # JSON output
+uv run benchmarks/run_all.py          # run all solvers (hits live APIs)
+uv run benchmarks/run_all.py --json   # JSON output for CI
 ```
 
 See [`benchmarks/README.md`](benchmarks/README.md) for details.

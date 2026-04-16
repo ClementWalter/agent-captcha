@@ -157,15 +157,18 @@ def _generate_challenge(
 # ── Entry points ────────────────────────────────────────────────────────────
 
 
-def solve_offline() -> dict:
-    """Generate and solve a custody-chain challenge locally."""
+def solve() -> dict:
+    """Generate and solve a custody-chain challenge locally.
+
+    @logscore/botcha is an npm library (not a hosted API), so we generate
+    a representative challenge matching the library's format and solve it.
+    """
     t0 = time.perf_counter()
 
     narrative, expected = _generate_challenge(n_events=23)
     answer = solve_custody_chain(narrative)
     elapsed = time.perf_counter() - t0
 
-    # Count events and transfers from the narrative
     events = len(re.findall(r"^Event \d+:", narrative, re.MULTILINE))
     transfers = sum(
         1
@@ -182,17 +185,6 @@ def solve_offline() -> dict:
         "detail": f"events={events}, transfers={transfers}, no LLM used",
         "method": "state machine",
     }
-
-
-def solve(*, live: bool = False) -> dict:
-    """Entry point used by run_all.py.
-
-    @logscore/botcha is an npm library (not a hosted API), so live and offline
-    are equivalent: we generate a representative challenge and solve it.
-    """
-    # Why both modes are the same: there's no hosted API to hit, the npm
-    # package is a library that generates challenges programmatically.
-    return solve_offline()
 
 
 # ── Standalone execution ────────────────────────────────────────────────────

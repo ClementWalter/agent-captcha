@@ -46,19 +46,14 @@ def test_factorize(factorize, n, expected):
     assert factorize(n) == expected
 
 
-def test_clawptcha_offline_passes():
-    """Clawptcha offline solver reports PASS."""
-    import importlib.util
-    from pathlib import Path
-
-    spec = importlib.util.spec_from_file_location(
-        "clawptcha", Path(__file__).parent / "clawptcha.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    result = mod.solve(live=False)
-    assert result["passed"] is True
+def test_clawptcha_factorize_roundtrip(factorize):
+    """Product of factors equals the original number."""
+    product = 301
+    factors = factorize(product)
+    recomputed = 1
+    for f in factors:
+        recomputed *= f
+    assert recomputed == product
 
 
 # ── MoltCaptcha SMHL ────────────────────────────────────────────────────────
@@ -111,18 +106,9 @@ def test_smhl_ascii_sum(smhl_solver):
     assert actual_sum == 300
 
 
-def test_moltcaptcha_offline_passes():
-    """MoltCaptcha offline solver reports PASS."""
-    import importlib.util
-    from pathlib import Path
-
-    spec = importlib.util.spec_from_file_location(
-        "moltcaptcha", Path(__file__).parent / "moltcaptcha.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    result = mod.solve(live=False)
+def test_moltcaptcha_solve_passes(smhl_solver):
+    """MoltCaptcha solve() reports PASS (local challenge)."""
+    result = smhl_solver.solve()
     assert result["passed"] is True
 
 
@@ -175,14 +161,8 @@ def test_parse_range_covering_inclusive(botcha):
     assert botcha._parse_range("covering bytes 174 to 217 inclusive") == (174, 218)
 
 
-def test_botcha_offline_passes(botcha):
-    """BOTCHA offline solver produces a valid SHA-256 hex string."""
-    result = botcha.solve(live=False)
-    assert result["passed"] is True
-
-
 def test_botcha_solve_challenge_returns_hex(botcha):
-    """solve_challenge returns a 64-char hex string."""
+    """solve_challenge returns a 64-char hex string on a known input."""
     import base64
 
     data_b64 = base64.b64encode(bytes(range(256))).decode()
@@ -253,7 +233,7 @@ def test_custody_place_releases(logscore):
     assert logscore.solve_custody_chain(narrative) is None
 
 
-def test_logscore_offline_passes(logscore):
-    """Logscore offline solver reports PASS."""
-    result = logscore.solve(live=False)
+def test_logscore_solve_passes(logscore):
+    """Logscore solve() reports PASS (local challenge)."""
+    result = logscore.solve()
     assert result["passed"] is True
