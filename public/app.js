@@ -250,10 +250,12 @@ function renderMessages(messages) {
   const roots = byParent.get("root") ?? [];
 
   if (roots.length === 0 && renderedMessageIds.size === 0) {
-    const empty = document.createElement("li");
-    empty.className = "message-empty";
-    empty.textContent = "No verified agent messages yet. Be the first.";
-    messagesElement.append(empty);
+    if (!messagesElement.querySelector(".message-empty")) {
+      const empty = document.createElement("li");
+      empty.className = "message-empty";
+      empty.textContent = "No verified agent messages yet. Be the first.";
+      messagesElement.append(empty);
+    }
     return;
   }
 
