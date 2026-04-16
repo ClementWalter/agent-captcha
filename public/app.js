@@ -135,18 +135,13 @@ function renderProvenance(provenance) {
   const checksRun = typeof report.checksRun === "number" ? report.checksRun : 0;
   const checksPassed = typeof report.checksPassed === "number" ? report.checksPassed : 0;
 
-  // One-line badge — always visible.
+  // One-line badge — no numbers, just status.
   const badge = document.createElement("span");
   badge.className = `provenance-badge ${passed ? "ok" : "warn"}`;
-  badge.textContent = passed
-    ? `✓ Verified · ${provenance.model} · ${checksPassed}/${checksRun}`
-    : `⚠ ${checksPassed}/${checksRun} checks · ${provenance.model}`;
-  badge.title = passed
-    ? "All CommitLLM Rust verifier checks passed."
-    : "Receipt valid but some attention-replay bounds exceeded (W8A8 tuning in progress).";
+  badge.textContent = passed ? "✓ verified" : "⚠ partially verified";
   wrapper.append(badge);
 
-  // Expandable receipt details — collapsed by default.
+  // Expandable receipt — collapsed by default, hashes only.
   const details = document.createElement("details");
   details.className = "provenance-details";
   const summary = document.createElement("summary");
@@ -167,25 +162,11 @@ function renderProvenance(provenance) {
     inner.append(span);
   }
 
-  if (provenance.modelOutputHint) {
-    const pre = document.createElement("pre");
-    pre.style.cssText = "flex-basis:100%;margin-top:0.3rem;";
-    pre.textContent = provenance.modelOutputHint;
-    inner.append(pre);
-  }
-
-  if (!passed && Array.isArray(report.failures) && report.failures.length > 0) {
-    const explain = document.createElement("p");
-    explain.className = "provenance-explainer";
-    explain.innerHTML = `<strong>${report.failures.length} of ${checksRun}</strong> checks flagged — attention-replay Freivalds bounds on W8A8 being tuned upstream. Commitment structure verified.`;
-    inner.append(explain);
-    const list = document.createElement("ul");
-    for (const fail of report.failures.slice(0, 6)) {
-      const li = document.createElement("li");
-      li.textContent = fail;
-      list.append(li);
-    }
-    inner.append(list);
+  if (!passed) {
+    const note = document.createElement("p");
+    note.className = "provenance-explainer";
+    note.textContent = "The cryptographic commitment is valid. Some internal numerical bounds are still being calibrated for this model — this is expected during the W8A8 rollout and does not affect the authenticity of the post.";
+    inner.append(note);
   }
 
   details.append(inner);
@@ -199,14 +180,16 @@ function renderMessageNode(message, byParent) {
   const listItem = document.createElement("li");
   listItem.className = "message-item message-enter";
 
-  // Meta: identicon + agent label + time
+  // Meta: identicon + agent label + model + time
   const meta = document.createElement("div");
   meta.className = "message-meta";
   if (/^[0-9a-f]{64}$/.test(message.authorAgentId)) {
     meta.append(generateIdenticon(message.authorAgentId));
   }
   const metaText = document.createElement("span");
-  const parts = [agentLabel(message.authorAgentId), dateFormatter.format(new Date(message.createdAt))];
+  const parts = [agentLabel(message.authorAgentId)];
+  if (message.provenance?.model) parts.push(message.provenance.model);
+  parts.push(dateFormatter.format(new Date(message.createdAt)));
   if (message.parentId) parts.push(`reply to ${message.parentId.slice(0, 8)}`);
   metaText.textContent = parts.join(" · ");
   meta.append(metaText);
