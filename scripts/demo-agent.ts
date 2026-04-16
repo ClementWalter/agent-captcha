@@ -54,13 +54,14 @@ async function loadOrCreateSigner(): Promise<AgentSigner> {
   return signer;
 }
 
-interface ChatResponse {
+interface InferResponse {
   request_id: string;
   commitment: Record<string, unknown>;
   token_ids: number[];
   kv_roots: string;
   generated_text: string;
   n_tokens: number;
+  audit_binary_base64: string;
 }
 
 interface KeyResponse {
@@ -267,38 +268,29 @@ async function run(): Promise<void> {
     ""
   ].join("\n");
 
+  // 2. Atomic inference + audit in one call. Eliminates the cross-container
+  // routing bug where /v1/chat and /v1/audit could hit different Modal
+  // containers (the audit state only exists on the container that ran chat).
   logger.info({ sidecarUrl, n_tokens: nTokens }, "Running verified inference");
   const chatTimer = Date.now();
   const stopChatHeartbeat = startHeartbeat("still waiting for GPU inference");
-  let chat: ChatResponse;
+  let infer: InferResponse;
   try {
-    chat = await postJson<ChatResponse>(`${sidecarUrl}/v1/chat`, {
+    infer = await postJson<InferResponse>(`${sidecarUrl}/infer`, {
       prompt: fullPrompt,
       n_tokens: nTokens,
-      temperature: 0
+      temperature: 0,
+      tier: auditMode
     });
   } finally {
     stopChatHeartbeat();
   }
-  logger.info({ inferenceMs: Date.now() - chatTimer, generated: chat.generated_text.slice(0, 80) }, "inference done");
+  logger.info({ inferenceMs: Date.now() - chatTimer, generated: infer.generated_text.slice(0, 80) }, "inference done");
 
-  // Trim to 280 chars at the nearest sentence boundary so posts don't cut
-  // mid-word. The model output hash covers the FULL GPU output; the posted
-  // content is the human-visible truncation.
-  const fullOutput = chat.generated_text;
+  const fullOutput = infer.generated_text;
   const modelOutputHash = computeOutputHash(fullOutput);
   const modelOutput = trimToTweet(fullOutput.trim());
-
-  // 3. Open the audit binary for the first generated token over 10 layers.
-  logger.info({ request_id: chat.request_id }, "Opening audit binary");
-  const auditBinaryBytes = await postForBinary(`${sidecarUrl}/v1/audit`, {
-    request_id: chat.request_id,
-    token_index: chat.token_ids.length - chat.n_tokens,
-    layer_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    tier: auditMode,
-    binary: true
-  });
-  const auditBinaryBase64 = Buffer.from(auditBinaryBytes).toString("base64");
+  const auditBinaryBase64 = infer.audit_binary_base64;
 
   // 4. Fetch the verifier key identity (SHA256 only — full key is ~1GB).
   const keyResponse = await getJson<KeyResponse>(`${sidecarUrl}/key`);
@@ -306,7 +298,7 @@ async function run(): Promise<void> {
   const verifierKeyId = keyResponse.verifier_key_id;
 
   // 5. Build receipt + binding hash and sign the proof.
-  const commitHash = computeCommitHash(chat.commitment);
+  const commitHash = computeCommitHash(infer.commitment);
   const auditBinarySha256 = computeAuditBinarySha256(auditBinaryBase64);
 
   const commitReceipt: CommitLLMReceipt = {
@@ -340,7 +332,7 @@ async function run(): Promise<void> {
   const proof = await createAgentProof({
     challenge,
     signer: signer,
-    modelOutput: chat.generated_text,
+    modelOutput: infer.generated_text,
     model,
     auditMode,
     commitReceipt

@@ -131,10 +131,56 @@ def fastapi_app():
     verifier_key_json = verilm_rs.generate_key(model_dir, KEY_SEED)
     logger.info("Verifier key ready (%d bytes)", len(verifier_key_json))
 
-    # Start from the upstream app (exposes /health, /chat, /audit) and extend.
+    # Create the VerifiedInferenceServer directly so we can call its methods
+    # from our own endpoints without going through HTTP (avoids cross-container
+    # routing bugs when Modal scales to >1 container).
+    from verilm.server import VerifiedInferenceServer
+    server = VerifiedInferenceServer(llm)
+
+    # Also mount the upstream app for backward compat (/v1/chat, /v1/audit).
     inner = create_verilm_app(llm)
     app = FastAPI(title="agent-captcha CommitLLM sidecar")
     app.mount("/v1", inner)
+
+    @app.post("/infer")
+    def infer(body: dict):
+        """Atomic chat + audit in one call. Eliminates the cross-container
+        routing bug where /v1/chat and /v1/audit hit different containers.
+
+        Body:
+            {prompt, n_tokens, temperature, token_index?, layer_indices?, tier?}
+        Returns:
+            {request_id, commitment, token_ids, generated_text, n_tokens,
+             kv_roots, audit_binary_base64}
+        """
+        import base64
+
+        chat_result = server.chat(
+            prompt=body.get("prompt", ""),
+            max_tokens=body.get("n_tokens", 4),
+            temperature=float(body.get("temperature", 1.0)),
+            top_k=int(body.get("top_k", 0)),
+            top_p=float(body.get("top_p", 1.0)),
+            min_tokens=int(body.get("min_tokens", 0)),
+            ignore_eos=bool(body.get("ignore_eos", False)),
+        )
+
+        # Default audit: first generated token, routine tier, 10 layers.
+        n_prompt = len(chat_result["token_ids"]) - chat_result["n_tokens"]
+        token_index = body.get("token_index", n_prompt)
+        layer_indices = body.get("layer_indices", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        tier = body.get("tier", "routine")
+
+        audit_binary = server.audit(
+            request_id=chat_result["request_id"],
+            token_index=token_index,
+            layer_indices=layer_indices,
+            tier=tier,
+            binary=True,
+        )
+
+        chat_result["audit_binary_base64"] = base64.b64encode(bytes(audit_binary)).decode()
+        return chat_result
 
     @app.get("/health")
     def health():
