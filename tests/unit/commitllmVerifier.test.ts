@@ -160,6 +160,21 @@ describe("commitllm modal verifier", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("rejects low pass-rate reports in non-strict mode (crafted-binary defense)", async () => {
+    const receipt = buildReceipt();
+    // The original exploit: a 26-byte forged binary passed 1/8 checks.
+    // The old gate (checks_run > 0) accepted it. The new 90% threshold rejects it.
+    const verifier = makeVerifier(fetchReturning({
+      ok: true,
+      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
+      report: { passed: false, checks_run: 8, checks_passed: 1, failures: ["forged"] }
+    }), false);
+
+    const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
+
+    expect(result.reason).toBe("commitllm_verify_v4_insufficient_pass_rate");
+  });
+
   it("rejects empty reports even in non-strict mode", async () => {
     const receipt = buildReceipt();
     const verifier = makeVerifier(fetchReturning({

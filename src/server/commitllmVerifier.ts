@@ -41,13 +41,21 @@ export interface CommitLLMModalVerifierConfig {
   maxAuditBinaryBytes?: number;
   /**
    * When true, only accept receipts where the Rust verifier reports
-   * `passed: true`. When false (demo mode), accept any report where the
-   * verifier ran >0 checks — the attention-replay Freivalds bounds are still
-   * being tuned for Qwen2.5-7B-W8A8 upstream.
+   * `passed: true`. When false, require a minimum pass rate (90% of checks
+   * must pass) — a fallback for when upstream Freivalds bounds are still
+   * being tuned.
    *
-   * Default: reads MODAL_VERIFY_STRICT env var (default "false" for now).
+   * Default: reads MODAL_VERIFY_STRICT env var (default "true").
    */
   strict?: boolean;
+  /**
+   * Shared secret sent as `x-sidecar-key` header to authenticate calls to
+   * the Modal sidecar. Without this, the sidecar's /key and /verify endpoints
+   * are open — an attacker can probe crafted binaries offline.
+   *
+   * Default: reads SIDECAR_API_KEY env var.
+   */
+  sidecarApiKey?: string;
   // Override for tests.
   fetchImpl?: typeof fetch;
 }
@@ -57,6 +65,7 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
   private readonly timeoutMs: number;
   private readonly maxAuditBinaryBytes: number;
   private readonly strict: boolean;
+  private readonly sidecarApiKey: string;
   private readonly fetchImpl: typeof fetch;
 
   public constructor(config: CommitLLMModalVerifierConfig) {
@@ -66,7 +75,12 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     this.sidecarUrl = config.sidecarUrl.replace(/\/+$/, "");
     this.timeoutMs = config.timeoutMs ?? 60_000;
     this.maxAuditBinaryBytes = config.maxAuditBinaryBytes ?? 10_000_000;
-    this.strict = config.strict ?? process.env.MODAL_VERIFY_STRICT === "true";
+    // Default to strict: non-strict was the original demo default that enabled
+    // the crafted-binary bypass (see vuln report 2026-04-16). Opt out explicitly
+    // with MODAL_VERIFY_STRICT=false only when upstream Freivalds bounds are
+    // known to reject legitimate inference.
+    this.strict = config.strict ?? process.env.MODAL_VERIFY_STRICT !== "false";
+    this.sidecarApiKey = config.sidecarApiKey ?? process.env.SIDECAR_API_KEY ?? "";
     this.fetchImpl = config.fetchImpl ?? fetch;
   }
 
@@ -130,9 +144,16 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     try {
       response = await this.fetchImpl(`${this.sidecarUrl}/verify`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(this.sidecarApiKey ? { "x-sidecar-key": this.sidecarApiKey } : {}),
+        },
         body: JSON.stringify({
-          audit_binary_base64: receipt.artifacts.auditBinaryBase64
+          audit_binary_base64: receipt.artifacts.auditBinaryBase64,
+          // Fix 3: pass expected output hash so the sidecar can cross-check
+          // that the audit binary's internal commitments match the claimed
+          // model output. Prevents rebinding a valid binary to arbitrary text.
+          expected_output_hash: expected.outputHash,
         }),
         signal: controller.signal
       });
@@ -166,19 +187,29 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     if (!report || typeof report.passed !== "boolean") {
       return { valid: false, reason: "commitllm_verify_v4_invalid_report" };
     }
-    if (this.strict && !report.passed) {
-      return { valid: false, reason: "commitllm_verify_v4_failed" };
-    }
-    if (!this.strict && (report.checks_run ?? 0) === 0) {
-      // Even in non-strict demo mode we require the verifier to have actually
-      // executed some checks — rejecting empty / never-ran reports.
+    const checksRun = report.checks_run ?? 0;
+    const checksPassed = report.checks_passed ?? 0;
+
+    if (checksRun === 0) {
       return { valid: false, reason: "commitllm_verify_v4_empty_report" };
     }
-    if (!report.passed) {
-      logger.warn(
-        { checks_run: report.checks_run, checks_passed: report.checks_passed, failures: report.failures },
-        "CommitLLM verify_v4 returned non-passing report (non-strict demo mode)"
-      );
+
+    if (this.strict) {
+      if (!report.passed) {
+        return { valid: false, reason: "commitllm_verify_v4_failed" };
+      }
+    } else {
+      // Non-strict fallback: require ≥90% of checks to pass. The old gate
+      // (checks_run > 0) was the root cause of the crafted-binary bypass —
+      // a 26-byte forged binary passed 1/8 checks and was accepted.
+      const passRate = checksRun > 0 ? checksPassed / checksRun : 0;
+      if (passRate < 0.9) {
+        logger.warn(
+          { checksRun, checksPassed, passRate, failures: report.failures },
+          "CommitLLM verify_v4 pass rate below threshold (non-strict mode)"
+        );
+        return { valid: false, reason: "commitllm_verify_v4_insufficient_pass_rate" };
+      }
     }
 
     if (bridgeResult.audit_binary_sha256 && bridgeResult.audit_binary_sha256 !== expected.auditBinarySha256) {

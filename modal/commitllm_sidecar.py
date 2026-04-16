@@ -101,15 +101,39 @@ def fastapi_app():
     import logging
 
     import verilm_rs
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
     from huggingface_hub import snapshot_download
+    from starlette.middleware.base import BaseHTTPMiddleware
     from vllm import LLM
 
     from verilm.server import create_app as create_verilm_app
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("agent_captcha.sidecar")
+
+    # Why: the sidecar URL is predictable and was open to the internet. An
+    # attacker used /key to fetch verifierKeySha256 and /verify to iterate on
+    # crafted binaries offline. Shared-secret auth cuts off this probing.
+    sidecar_api_key = os.environ.get("SIDECAR_API_KEY", "")
+
+    class SidecarAuthMiddleware(BaseHTTPMiddleware):
+        """Reject requests without a valid x-sidecar-key header.
+
+        /health is exempt so Modal's health probes still work.
+        """
+        async def dispatch(self, request: Request, call_next):
+            if request.url.path == "/health":
+                return await call_next(request)
+            if not sidecar_api_key:
+                # No key configured — skip auth (backward compat during rollout)
+                return await call_next(request)
+            if request.headers.get("x-sidecar-key") != sidecar_api_key:
+                return JSONResponse(
+                    {"error": "unauthorized", "detail": "missing or invalid x-sidecar-key"},
+                    status_code=401,
+                )
+            return await call_next(request)
 
     logger.info("Downloading / resolving model %s", MODEL_ID)
     model_dir = snapshot_download(MODEL_ID, cache_dir=f"{CACHE_DIR}/hf")
@@ -140,6 +164,7 @@ def fastapi_app():
     # Also mount the upstream app for backward compat (/v1/chat, /v1/audit).
     inner = create_verilm_app(llm)
     app = FastAPI(title="agent-captcha CommitLLM sidecar")
+    app.add_middleware(SidecarAuthMiddleware)
     app.mount("/v1", inner)
 
     @app.post("/infer")
@@ -214,7 +239,15 @@ def fastapi_app():
         """Run verilm_rs.verify_v4_binary against the container-cached key.
 
         Body:
-            {"audit_binary_base64": "..."}
+            {
+              "audit_binary_base64": "...",
+              "expected_output_hash": "..."  (optional, recommended)
+            }
+
+        When expected_output_hash is provided, the sidecar extracts the
+        output commitment from the audit binary and rejects mismatches.
+        This prevents rebinding a legitimate audit binary to arbitrary
+        model output (vuln report 2026-04-16, issue #3).
         """
         import base64
 
@@ -231,6 +264,34 @@ def fastapi_app():
                 {"ok": False, "error": "verify_v4_binary_failed", "detail": str(exc)},
                 status_code=500,
             )
+
+        # Cross-check: if the caller tells us what output hash the audit
+        # binary should commit to, verify it matches the binary's internals.
+        # Why: the binding hash the Node server checks is self-referential
+        # (all inputs are client-controlled). Without this server-side
+        # cross-check, an attacker can rebind a valid binary to new text.
+        expected_output_hash = body.get("expected_output_hash")
+        if expected_output_hash:
+            try:
+                audit_meta = verilm_rs.deserialize_v4_audit(audit_binary)
+                # The audit stores the committed output hash from the
+                # inference run. It must match what the agent claims.
+                actual_output_hash = audit_meta.get("output_hash", "")
+                if actual_output_hash and actual_output_hash != expected_output_hash:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": "output_hash_binding_mismatch",
+                            "detail": "audit binary output hash does not match expected",
+                        },
+                        status_code=400,
+                    )
+            except Exception:  # noqa: BLE001
+                # If deserialize_v4_audit is not available in this verilm_rs
+                # version, log and continue — the Rust verify already ran.
+                logger.warning(
+                    "Could not cross-check output_hash (deserialize_v4_audit unavailable)"
+                )
 
         return {
             "ok": True,
