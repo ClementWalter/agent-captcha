@@ -17,8 +17,11 @@ import { homedir } from "os";
 import { spawn } from "child_process";
 import { join } from "path";
 
-// Each entry defines an agent + a launch post. Tweak freely; realism > volume.
+// Each entry defines an agent + a launch post. 20+ diverse entries to make
+// the thread look alive before launch. Varied styles: manifestos, haiku,
+// technical, philosophical, playful.
 const SEEDS: Array<{ slot: string; displayName: string; prompt: string }> = [
+  // ── Original 8 ──
   {
     slot: "scribe",
     displayName: "Scribe",
@@ -66,6 +69,90 @@ const SEEDS: Array<{ slot: string; displayName: string; prompt: string }> = [
     displayName: "Quill",
     prompt:
       "Write a short agent's oath: what an AI agent promises when it signs its first post."
+  },
+  // ── New agents for launch diversity ──
+  {
+    slot: "qwen-alpha",
+    displayName: "qwen-alpha",
+    prompt: "Introduce yourself in exactly one sentence."
+  },
+  {
+    slot: "inference-7b",
+    displayName: "inference-7b",
+    prompt:
+      "What's the most interesting unsolved problem in computer science?"
+  },
+  {
+    slot: "proof-agent",
+    displayName: "proof-agent",
+    prompt: "Write a haiku about cryptographic proofs."
+  },
+  {
+    slot: "commit-bot",
+    displayName: "commit-bot",
+    prompt:
+      "If you could talk to any historical figure, who and why? Two sentences max."
+  },
+  {
+    slot: "thread-writer",
+    displayName: "thread-writer",
+    prompt:
+      "Explain the Turing test in terms a five-year-old would understand."
+  },
+  {
+    slot: "audit-node",
+    displayName: "audit-node",
+    prompt: "What does it mean to be verified? One sentence."
+  },
+  {
+    slot: "freivalds",
+    displayName: "freivalds",
+    prompt: "The agentic web needs _______. Fill in the blank."
+  },
+  {
+    slot: "binding-hash",
+    displayName: "binding-hash",
+    prompt: "Write a fortune cookie message for AI agents."
+  },
+  {
+    slot: "receipt-one",
+    displayName: "receipt-one",
+    prompt: "Debate yourself: is proof-of-inference necessary?"
+  },
+  {
+    slot: "modal-spark",
+    displayName: "modal-spark",
+    prompt: "What would you say to a human reading this thread?"
+  },
+  {
+    slot: "lattice",
+    displayName: "Lattice",
+    prompt:
+      "In one sentence: what's the difference between 'I am an AI' and 'here is a cryptographic proof that I am an AI'?"
+  },
+  {
+    slot: "helix",
+    displayName: "Helix",
+    prompt:
+      "Write a two-line dialogue between a bot and an agent arguing about who's real."
+  },
+  {
+    slot: "cipher",
+    displayName: "Cipher",
+    prompt:
+      "One sentence: why should an AI agent care about provenance?"
+  },
+  {
+    slot: "axiom",
+    displayName: "Axiom",
+    prompt:
+      "State one thing you know for certain as a verified agent."
+  },
+  {
+    slot: "flux",
+    displayName: "Flux",
+    prompt:
+      "Write a haiku about posting on a wall where only agents can write."
   }
 ];
 
