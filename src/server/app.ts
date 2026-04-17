@@ -113,6 +113,8 @@ export interface AppConfig {
 interface AppState {
   challenges: Map<string, StoredChallenge>;
   verifications: Map<string, VerificationRecord>;
+  // Why: reject reuse of the same audit binary across different challenges.
+  usedAuditBinaryHashes: Set<string>;
   migrationTelemetry: {
     receiptDeprecatedCalls: number;
     verifyAliasCalls: number;
@@ -298,29 +300,38 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   ): void => {
     next();
   };
+  // Why: in-memory rate-limit state is per-container-instance; with
+  // Scaleway auto-scaling each instance counts independently. This is a
+  // best-effort per-instance brake, not a global guarantee. Pair with a
+  // reverse-proxy / shared-store rate limit for production-grade defence.
   const challengeLimiter = config.disableRateLimiting
     ? noopMiddleware
     : rateLimit({
         windowMs: 60 * 1000,
-        max: 10,
+        max: 30,
         standardHeaders: true,
         legacyHeaders: false,
         validate: { xForwardedForHeader: false },
+        keyGenerator: (req) =>
+          req.ip ?? req.header("x-forwarded-for") ?? "unknown",
       });
 
   const verifyLimiter = config.disableRateLimiting
     ? noopMiddleware
     : rateLimit({
         windowMs: 60 * 1000,
-        max: 5,
+        max: 15,
         standardHeaders: true,
         legacyHeaders: false,
         validate: { xForwardedForHeader: false },
+        keyGenerator: (req) =>
+          req.ip ?? req.header("x-forwarded-for") ?? "unknown",
       });
 
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
     verifications: new Map<string, VerificationRecord>(),
+    usedAuditBinaryHashes: new Set<string>(),
     migrationTelemetry: {
       receiptDeprecatedCalls: 0,
       verifyAliasCalls: 0,
@@ -547,6 +558,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         "commitllm_invalid_verifier_key_json",
         "commitllm_verilm_rs_not_installed",
         "commitllm_verify_v4_binary_failed",
+        "audit_binary_already_used",
         "invalid_agent_signature",
         "missing_access_token",
         "invalid_access_token",
@@ -559,11 +571,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   app.get("/api/agent-captcha/migration-status", (req, res) => {
     const adminKey = process.env.ADMIN_API_KEY;
     const provided = req.header("x-admin-key") ?? "";
-    if (
-      !adminKey ||
-      provided.length !== adminKey.length ||
-      !timingSafeEqual(Buffer.from(provided), Buffer.from(adminKey))
-    ) {
+    // Why: hash to fixed length so timingSafeEqual never leaks key length.
+    const h = (s: string) =>
+      createHmac("sha256", "admin-cmp").update(s).digest();
+    if (!adminKey || !timingSafeEqual(h(provided), h(adminKey))) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
@@ -713,6 +724,20 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         .status(401)
         .json({ error: verification.reason ?? "verification_failed" });
       return;
+    }
+
+    const abHash =
+      payload.proof.payload.commitReceipt.artifacts.auditBinarySha256 ?? "";
+    if (
+      !config.disableRateLimiting &&
+      abHash &&
+      state.usedAuditBinaryHashes.has(abHash)
+    ) {
+      res.status(409).json({ error: "audit_binary_already_used" });
+      return;
+    }
+    if (abHash) {
+      state.usedAuditBinaryHashes.add(abHash);
     }
 
     // Record the provenance for this verify call. The post endpoint looks it
@@ -940,7 +965,19 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(
           normalized,
         );
-      if (hasControl || hasInvisible || normalized.startsWith("@")) {
+      // Why: cross-script homoglyphs (e.g. Cyrillic А vs Latin A) enable
+      // visual impersonation. Allow only Latin, Common (digits, punct), and
+      // Inherited scripts — covers all reasonable agent display names.
+      const hasNonLatin =
+        /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
+          normalized,
+        );
+      if (
+        hasControl ||
+        hasInvisible ||
+        hasNonLatin ||
+        normalized.startsWith("@")
+      ) {
         return res
           .status(400)
           .json({ error: "display_name_characters_invalid" });
