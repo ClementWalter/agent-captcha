@@ -5,12 +5,12 @@ import { z } from "zod/v4";
 import FeatureEnumScanPrompt from "../prompts/feature-enum-scan.mdx";
 import FeatureEnumRefinePrompt from "../prompts/feature-enum-refine.mdx";
 
-export const featureEnumOutputSchema = z.object({
+export const featureEnumOutputSchema = z.looseObject({
   featureGroups: z.record(z.string(), z.array(z.string())).default({}),
   totalFeatures: z.number().int().default(0),
   lastCommitHash: z.string().nullable().optional(),
   markdownBody: z.string(),
-}).passthrough();
+});
 
 type FeatureEnumProps = {
   idPrefix: string;
@@ -32,9 +32,15 @@ export function FeatureEnum({
   additionalContext = "",
 }: FeatureEnumProps) {
   const isFirstRun = !existingFeatures;
-  const totalRefineIterations = Math.max(1, refineIterations ?? (isFirstRun ? 5 : 1));
+  const totalRefineIterations = Math.max(
+    1,
+    refineIterations ?? (isFirstRun ? 5 : 1),
+  );
   const scanTaskId = `${idPrefix}:scan`;
-  const refineTaskIds = Array.from({ length: totalRefineIterations }, (_, index) => `${idPrefix}:refine:${index + 1}`);
+  const refineTaskIds = Array.from(
+    { length: totalRefineIterations },
+    (_, index) => `${idPrefix}:refine:${index + 1}`,
+  );
   const finalTaskId = `${idPrefix}:result`;
 
   return (
@@ -56,9 +62,12 @@ export function FeatureEnum({
       )}
 
       {refineTaskIds.map((taskId, index) => {
-        const previousTaskId = index === 0
-          ? (isFirstRun ? scanTaskId : null)
-          : refineTaskIds[index - 1];
+        const previousTaskId =
+          index === 0
+            ? isFirstRun
+              ? scanTaskId
+              : null
+            : refineTaskIds[index - 1];
 
         if (previousTaskId) {
           return (
@@ -84,7 +93,9 @@ export function FeatureEnum({
               {(deps) => (
                 <FeatureEnumRefinePrompt
                   existingFeatures={deps.previous.featureGroups}
-                  lastCommitHash={deps.previous.lastCommitHash ?? lastCommitHash}
+                  lastCommitHash={
+                    deps.previous.lastCommitHash ?? lastCommitHash
+                  }
                   iteration={index + 1}
                 />
               )}

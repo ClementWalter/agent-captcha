@@ -18,7 +18,7 @@ const moduleSketchSchema = z.object({
   needsTests: z.boolean().default(false),
 });
 
-export const prdOutputSchema = z.object({
+export const prdOutputSchema = z.looseObject({
   title: z.string(),
   problemStatement: z.string(),
   solution: z.string(),
@@ -29,7 +29,7 @@ export const prdOutputSchema = z.object({
   outOfScope: z.array(z.string()).default([]),
   furtherNotes: z.string().nullable().default(null),
   markdownBody: z.string(),
-}).passthrough();
+});
 
 type WriteAPrdProps = {
   idPrefix: string;
@@ -53,20 +53,25 @@ export function WriteAPrd({
   outputFormat = "markdown",
 }: WriteAPrdProps) {
   const additionalInstructions = [
-    exploreCodebase && "Explore the codebase to verify assertions before writing.",
-    interviewFirst && `Interview the user first (up to ${maxInterviewQuestions} questions).`,
-    moduleDepthGuidance && "Prefer deep modules over shallow ones when sketching architecture.",
-    outputFormat === "json" && "Return structured JSON in addition to the markdown body.",
-  ].filter(Boolean).join("\n");
+    exploreCodebase &&
+      "Explore the codebase to verify assertions before writing.",
+    interviewFirst &&
+      `Interview the user first (up to ${maxInterviewQuestions} questions).`,
+    moduleDepthGuidance &&
+      "Prefer deep modules over shallow ones when sketching architecture.",
+    outputFormat === "json" &&
+      "Return structured JSON in addition to the markdown body.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return (
     <Sequence>
-      <Task
-        id={`${idPrefix}:prd`}
-        output={prdOutputSchema}
-        agent={agent}
-      >
-        <WriteAPrdPrompt context={context} additionalInstructions={additionalInstructions} />
+      <Task id={`${idPrefix}:prd`} output={prdOutputSchema} agent={agent}>
+        <WriteAPrdPrompt
+          context={context}
+          additionalInstructions={additionalInstructions}
+        />
       </Task>
     </Sequence>
   );

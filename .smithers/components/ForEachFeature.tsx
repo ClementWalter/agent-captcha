@@ -1,27 +1,33 @@
 // smithers-source: seeded
 /** @jsxImportSource smithers-orchestrator */
-import { Parallel, Sequence, Task, type AgentLike } from "smithers-orchestrator";
+import {
+  Parallel,
+  Sequence,
+  Task,
+  type AgentLike,
+} from "smithers-orchestrator";
 import { z } from "zod/v4";
+import FeatureTaskPrompt from "~/prompts/feature-task.mdx";
 
-export const forEachFeatureResultSchema = z.object({
+export const forEachFeatureResultSchema = z.looseObject({
   groupName: z.string(),
   result: z.string(),
   featuresCovered: z.array(z.string()).default([]),
   score: z.number().min(0).max(100).optional(),
-}).passthrough();
+});
 
-export const forEachFeatureMergeSchema = z.object({
+export const forEachFeatureMergeSchema = z.looseObject({
   totalGroups: z.number().int(),
   summary: z.string(),
   mergedResult: z.string(),
   markdownBody: z.string(),
-}).passthrough();
+});
 
 type ForEachFeatureProps = {
   idPrefix: string;
   agent: AgentLike | AgentLike[];
   features: Record<string, string[]>;
-  prompt: string;
+  prompt: React.ReactNode;
   maxConcurrency?: number;
   mergeAgent?: AgentLike | AgentLike[];
   granularity?: "group" | "feature";
@@ -50,23 +56,30 @@ export function ForEachFeature({
   mergeAgent,
   granularity = "group",
 }: ForEachFeatureProps) {
-  const featureEntries = Object.entries(features ?? {}).filter(([, groupFeatures]) => Array.isArray(groupFeatures) && groupFeatures.length > 0);
-  const workItems: FeatureWorkItem[] = granularity === "feature"
-    ? featureEntries.flatMap(([groupName, groupFeatures]) =>
-        groupFeatures.map((feature, index) => ({
-          id: `${slugifyFeatureToken(groupName)}:${slugifyFeatureToken(feature)}:${index}`,
+  const featureEntries = Object.entries(features ?? {}).filter(
+    ([, groupFeatures]) =>
+      Array.isArray(groupFeatures) && groupFeatures.length > 0,
+  );
+  const workItems: FeatureWorkItem[] =
+    granularity === "feature"
+      ? featureEntries.flatMap(([groupName, groupFeatures]) =>
+          groupFeatures.map((feature, index) => ({
+            id: `${slugifyFeatureToken(groupName)}:${slugifyFeatureToken(feature)}:${index}`,
+            groupName,
+            features: [feature],
+          })),
+        )
+      : featureEntries.map(([groupName, groupFeatures], index) => ({
+          id: `${slugifyFeatureToken(groupName)}:${index}`,
           groupName,
-          features: [feature],
-        })),
-      )
-    : featureEntries.map(([groupName, groupFeatures], index) => ({
-        id: `${slugifyFeatureToken(groupName)}:${index}`,
-        groupName,
-        features: groupFeatures,
-      }));
+          features: groupFeatures,
+        }));
 
   const mergeNeeds: Record<string, string> = Object.fromEntries(
-    workItems.map((item, index) => [`item${index}`, `${idPrefix}:group:${item.id}`]),
+    workItems.map((item, index) => [
+      `item${index}`,
+      `${idPrefix}:group:${item.id}`,
+    ]),
   );
   const mergeDeps = Object.fromEntries(
     workItems.map((_, index) => [`item${index}`, forEachFeatureResultSchema]),
@@ -98,18 +111,12 @@ export function ForEachFeature({
             agent={agent}
             continueOnFail
           >
-            {[
-              `# ${granularity === "feature" ? "Feature" : "Feature Group"} Task`,
-              "",
-              `Group: ${item.groupName}`,
-              `Granularity: ${granularity}`,
-              "",
-              "Features:",
-              ...item.features.map((feature) => `- ${feature}`),
-              "",
-              "REQUEST:",
-              prompt,
-            ].join("\n")}
+            <FeatureTaskPrompt
+              granularity={granularity}
+              groupName={item.groupName}
+              features={item.features}
+              prompt={prompt}
+            />
           </Task>
         ))}
       </Parallel>
@@ -122,7 +129,8 @@ export function ForEachFeature({
       >
         {(deps) => {
           const results = workItems.map((_, index) => deps[`item${index}`]);
-          const totalGroups = new Set(workItems.map((item) => item.groupName)).size;
+          const totalGroups = new Set(workItems.map((item) => item.groupName))
+            .size;
           return [
             "# Merge Feature Results",
             "",
@@ -135,7 +143,8 @@ export function ForEachFeature({
             "Preserve group boundaries, highlight the most important gaps, and produce a markdownBody suitable for a report.",
             "",
             ...results.flatMap((result, index) => {
-              const groupLabel = workItems[index]?.groupName ?? `Group ${index + 1}`;
+              const groupLabel =
+                workItems[index]?.groupName ?? `Group ${index + 1}`;
               return [
                 `## ${groupLabel}`,
                 `Features covered: ${(result?.featuresCovered ?? []).join(", ") || "none"}`,
