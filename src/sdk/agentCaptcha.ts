@@ -366,6 +366,18 @@ export async function verifyAgentProof(input: {
     return { valid: false, reason: "receipt_binding_hash_mismatch" };
   }
 
+  // Verify Ed25519 signature BEFORE the remote sidecar call to reject
+  // crafted proofs cheaply and avoid GPU cost amplification.
+  const signatureValid = await verifyAsync(
+    hexToBytes(input.proof.signature),
+    serializePayload(payload),
+    hexToBytes(payload.agentPublicKey)
+  );
+
+  if (!signatureValid) {
+    return { valid: false, reason: "invalid_agent_signature" };
+  }
+
   const receiptResult = await input.verifier.verifyReceipt(payload.commitReceipt, {
     challengeId: payload.challengeId,
     outputHash: payload.modelOutputHash,
@@ -379,16 +391,6 @@ export async function verifyAgentProof(input: {
   });
   if (!receiptResult.valid) {
     return receiptResult;
-  }
-
-  const signatureValid = await verifyAsync(
-    hexToBytes(input.proof.signature),
-    serializePayload(payload),
-    hexToBytes(payload.agentPublicKey)
-  );
-
-  if (!signatureValid) {
-    return { valid: false, reason: "invalid_agent_signature" };
   }
 
   const challengeAge = now.getTime() - new Date(input.challenge.issuedAt).getTime();

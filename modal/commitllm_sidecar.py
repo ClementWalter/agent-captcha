@@ -9,10 +9,8 @@ key once and validate audit binaries without running a Python/Rust bridge.
 Deploy:
     modal deploy modal/commitllm_sidecar.py
 
-The deploy prints a persistent URL like:
-    https://clementwalter--agent-captcha-commitllm-fastapi-app.modal.run
-
-Save that as MODAL_SIDECAR_URL in the Node server config.
+The deploy prints a persistent URL — save it as MODAL_SIDECAR_URL in the Node
+server config.
 """
 
 from __future__ import annotations
@@ -210,7 +208,7 @@ def fastapi_app():
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "model": MODEL_ID}
+        return {"status": "ok"}
 
     # Canonicalize once so the hash is stable across containers regardless of
     # key serialization order (verilm_rs.generate_key returns JSON bytes whose

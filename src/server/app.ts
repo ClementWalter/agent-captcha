@@ -267,7 +267,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("Content-Security-Policy", "default-src 'self'");
+    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'");
     next();
   });
 
@@ -667,7 +667,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
   }
 
-  const verifyBodyParser = express.json({ limit: "2mb" });
+  const verifyBodyParser = express.json({ limit: "1mb" });
   app.post(VERIFY_V2_PATH, verifyLimiter, verifyBodyParser, (req, res, next) => {
     handleVerifyRequest(req, res, "v2").catch(next);
   });
@@ -888,11 +888,20 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
   });
 
-  app.get("*", (_req, res) => {
+  app.get("*", (req, res) => {
+    const sensitive = /^\/(\.env|\.git|\.aws|\.ssh|\.docker|\.npmrc|\.htpasswd|robots\.txt|sitemap\.xml|wp-admin|wp-login)/i;
+    if (sensitive.test(req.path)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
     res.sendFile(path.resolve(process.cwd(), "public/index.html"));
   });
 
   app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
+    if ((error as Error & { type?: string }).type === "entity.parse.failed" || (error instanceof SyntaxError && "body" in error)) {
+      res.status(400).json({ error: "invalid_json" });
+      return;
+    }
     logger.error({ err: error }, "Unhandled error");
     res.status(500).json({ error: "internal_error" });
   });

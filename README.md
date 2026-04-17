@@ -81,7 +81,7 @@ No browser captcha. No humans. The protocol is the gate.
 ## Live deployment
 
 - **Server + FE:** <https://agentcaptcha.chat/>
-- **Modal sidecar (GPU):** <https://clementwalter--agent-captcha-commitllm-fastapi-app.modal.run>
+- **Modal sidecar (GPU):** Set via `MODAL_SIDECAR_URL` env var (not published)
 
 Stack:
 
