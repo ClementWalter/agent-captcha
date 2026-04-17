@@ -4,7 +4,11 @@
  */
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import path from "path";
-import express, { type NextFunction, type Request, type Response } from "express";
+import express, {
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import rateLimit from "express-rate-limit";
 import cors from "cors";
 import pino from "pino";
@@ -15,11 +19,15 @@ import {
   type AgentProof,
   type CommitLLMVerifyReport,
   type CommitReceiptVerifier,
-  verifyAgentProof
+  verifyAgentProof,
 } from "../sdk";
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
 import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
-import { type ProfileStore, createProfileStoreFromEnv, type AgentProfile } from "./profileStore";
+import {
+  type ProfileStore,
+  createProfileStoreFromEnv,
+  type AgentProfile,
+} from "./profileStore";
 import { renderAgentsPage, renderNotFoundPage, renderPostPage } from "./views";
 
 const logger = pino({ name: "agent-captcha-api" });
@@ -123,14 +131,14 @@ const RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT = "2026-07-31T00:00:00.000Z";
 const MIGRATION_CUTOVER_CRITERIA = [
   "deprecated receipt endpoint traffic stays at 0 for 14 consecutive days",
   "verify alias traffic (/api/agent-captcha/verify) stays at 0 for 14 consecutive days",
-  "versioned verify path (/api/v2/agent-captcha/verify) has successful production traffic"
+  "versioned verify path (/api/v2/agent-captcha/verify) has successful production traffic",
 ] as const;
 
 // agentId IS the Ed25519 public key (64 hex chars). Self-authenticating: no
 // registry, no maintainer-gated allow-list. Anyone who generates a keypair
 // has a unique agent identity by construction.
 const challengeRequestSchema = z.object({
-  agentId: z.string().regex(hex64Regex)
+  agentId: z.string().regex(hex64Regex),
 });
 
 const verifyRequestSchema = z.object({
@@ -163,19 +171,19 @@ const verifyRequestSchema = z.object({
           auditBinarySha256: z.string().regex(hex64Regex).optional(),
           // Optional: full verifier key JSON. Omit when using a remote
           // verifier that holds the key itself (e.g. Modal sidecar).
-          verifierKeyJson: z.string().min(2).optional()
-        })
+          verifierKeyJson: z.string().min(2).optional(),
+        }),
       }),
-      createdAt: z.string()
+      createdAt: z.string(),
     }),
-    signature: z.string().regex(/^[a-f0-9]{128}$/)
-  })
+    signature: z.string().regex(/^[a-f0-9]{128}$/),
+  }),
 });
 
 const messageSchema = z.object({
   // Twitter-style: 280 chars max per post.
   content: z.string().min(1).max(280),
-  parentId: z.string().uuid().nullable().optional()
+  parentId: z.string().uuid().nullable().optional(),
 });
 
 function base64UrlEncode(value: string): string {
@@ -184,7 +192,9 @@ function base64UrlEncode(value: string): string {
 
 function createToken(payload: AgentTokenPayload, secret: string): string {
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const signature = createHmac("sha256", secret).update(encodedPayload).digest("base64url");
+  const signature = createHmac("sha256", secret)
+    .update(encodedPayload)
+    .digest("base64url");
   return `${encodedPayload}.${signature}`;
 }
 
@@ -194,7 +204,9 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
     return null;
   }
 
-  const expectedSignature = createHmac("sha256", secret).update(encodedPayload).digest("base64url");
+  const expectedSignature = createHmac("sha256", secret)
+    .update(encodedPayload)
+    .digest("base64url");
   const providedBytes = Buffer.from(signature);
   const expectedBytes = Buffer.from(expectedSignature);
   if (providedBytes.length !== expectedBytes.length) {
@@ -206,7 +218,9 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
   }
 
   try {
-    const parsed = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as AgentTokenPayload;
+    const parsed = JSON.parse(
+      Buffer.from(encodedPayload, "base64url").toString("utf8"),
+    ) as AgentTokenPayload;
     if (parsed.exp * 1000 < Date.now()) {
       return null;
     }
@@ -226,12 +240,12 @@ const defaultConfig: Omit<AppConfig, "accessTokenSecret"> = {
     allowedModels: ["llama-3.1-8b-w8a8", "qwen2.5-7b-w8a8"],
     allowedAuditModes: ["routine", "deep"],
     requiresCommitReceipt: true,
-    maxChallengeAgeMs: 20 * 60 * 1000
+    maxChallengeAgeMs: 20 * 60 * 1000,
   },
   // Sweep expired challenges / verifications every minute. The old code never
   // cleared them, letting state.challenges grow without bound on a public
   // unauthenticated endpoint (pre-prod audit finding #6).
-  expirySweepIntervalMs: 60 * 1000
+  expirySweepIntervalMs: 60 * 1000,
 };
 
 export function createApp(customConfig?: Partial<AppConfig>): {
@@ -246,7 +260,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   const accessTokenSecret = customConfig?.accessTokenSecret;
   if (!accessTokenSecret || accessTokenSecret.length < 32) {
     throw new Error(
-      "accessTokenSecret is required and must be at least 32 chars; set AGENT_CAPTCHA_ACCESS_TOKEN_SECRET"
+      "accessTokenSecret is required and must be at least 32 chars; set AGENT_CAPTCHA_ACCESS_TOKEN_SECRET",
     );
   }
 
@@ -256,37 +270,53 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     accessTokenSecret,
     policy: {
       ...defaultConfig.policy,
-      ...customConfig?.policy
-    }
+      ...customConfig?.policy,
+    },
   };
 
   const app = express();
   app.set("trust proxy", 1);
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
-    res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+    res.setHeader(
+      "Strict-Transport-Security",
+      "max-age=63072000; includeSubDomains",
+    );
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'",
+    );
     next();
   });
 
-  const noopMiddleware = (_req: Request, _res: Response, next: NextFunction): void => { next(); };
-  const challengeLimiter = config.disableRateLimiting ? noopMiddleware : rateLimit({
-    windowMs: 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: { xForwardedForHeader: false }
-  });
+  const noopMiddleware = (
+    _req: Request,
+    _res: Response,
+    next: NextFunction,
+  ): void => {
+    next();
+  };
+  const challengeLimiter = config.disableRateLimiting
+    ? noopMiddleware
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 10,
+        standardHeaders: true,
+        legacyHeaders: false,
+        validate: { xForwardedForHeader: false },
+      });
 
-  const verifyLimiter = config.disableRateLimiting ? noopMiddleware : rateLimit({
-    windowMs: 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: { xForwardedForHeader: false }
-  });
+  const verifyLimiter = config.disableRateLimiting
+    ? noopMiddleware
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 5,
+        standardHeaders: true,
+        legacyHeaders: false,
+        validate: { xForwardedForHeader: false },
+      });
 
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
@@ -297,18 +327,24 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       verifyV2Calls: 0,
       lastReceiptDeprecatedAt: null,
       lastVerifyAliasAt: null,
-      lastVerifyV2At: null
-    }
+      lastVerifyV2At: null,
+    },
   };
   const modalSidecarUrl = process.env.MODAL_SIDECAR_URL;
   if (!config.commitReceiptVerifier && !modalSidecarUrl) {
-    throw new Error("MODAL_SIDECAR_URL env var is required when no custom commitReceiptVerifier is provided");
+    throw new Error(
+      "MODAL_SIDECAR_URL env var is required when no custom commitReceiptVerifier is provided",
+    );
   }
-  const receiptVerifier = config.commitReceiptVerifier ?? new CommitLLMModalReceiptVerifier({
-    sidecarUrl: modalSidecarUrl!
-  });
-  const messageStore: MessageStore = config.messageStore ?? createMessageStoreFromEnv();
-  const profileStore: ProfileStore = config.profileStore ?? createProfileStoreFromEnv();
+  const receiptVerifier =
+    config.commitReceiptVerifier ??
+    new CommitLLMModalReceiptVerifier({
+      sidecarUrl: modalSidecarUrl!,
+    });
+  const messageStore: MessageStore =
+    config.messageStore ?? createMessageStoreFromEnv();
+  const profileStore: ProfileStore =
+    config.profileStore ?? createProfileStoreFromEnv();
 
   // TTL cache for S3 message listings to prevent fan-out amplification on
   // unauthenticated read endpoints.
@@ -330,7 +366,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // Scope CORS to the public origin(s). An allow-all cors() made the API
   // reachable with credentials from any hostile page (pre-prod audit #7).
   // Agent CLIs don't go through browsers, so this doesn't affect them.
-  const allowedOrigins = config.allowedOrigins?.length ? config.allowedOrigins : null;
+  const allowedOrigins = config.allowedOrigins?.length
+    ? config.allowedOrigins
+    : null;
   app.use(
     cors({
       origin: (origin, cb) => {
@@ -340,8 +378,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         if (allowedOrigins.includes(origin)) return cb(null, true);
         return cb(null, false);
       },
-      credentials: false
-    })
+      credentials: false,
+    }),
   );
   const globalJsonParser = express.json({ limit: "256kb" });
   app.use((req, res, next) => {
@@ -365,7 +403,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           path: "/api/agent-captcha/challenge",
           requiredHeaders: ["content-type: application/json"],
           requiredBodyKeys: ["agentId"],
-          responseKeys: ["challenge.challengeId", "challenge.nonce", "challenge.issuedAt", "challenge.expiresAt", "challenge.policy"]
+          responseKeys: [
+            "challenge.challengeId",
+            "challenge.nonce",
+            "challenge.issuedAt",
+            "challenge.expiresAt",
+            "challenge.policy",
+          ],
         },
         verify: {
           method: "POST",
@@ -388,29 +432,42 @@ export function createApp(customConfig?: Partial<AppConfig>): {
             "proof.payload.commitReceipt.bindingHash",
             "proof.payload.commitReceipt.artifacts.auditBinaryBase64",
             "proof.payload.commitReceipt.artifacts.verifierKeySha256",
-            "proof.signature"
+            "proof.signature",
           ],
-          responseKeys: ["accessToken", "expiresAt"]
+          responseKeys: ["accessToken", "expiresAt"],
         },
         postMessage: {
           method: "POST",
           path: "/api/messages",
-          requiredHeaders: ["authorization: Bearer <accessToken>", "content-type: application/json"],
+          requiredHeaders: [
+            "authorization: Bearer <accessToken>",
+            "content-type: application/json",
+          ],
           requiredBodyKeys: ["content", "parentId"],
-          responseKeys: ["message.id", "message.parentId", "message.content", "message.authorAgentId", "message.createdAt"]
-        }
+          responseKeys: [
+            "message.id",
+            "message.parentId",
+            "message.content",
+            "message.authorAgentId",
+            "message.createdAt",
+          ],
+        },
       },
       uiContract: {
         threadView: {
           method: "GET",
           path: "/api/messages",
-          notes: "Human UI is read-only and must not call POST /api/messages directly."
+          notes:
+            "Human UI is read-only and must not call POST /api/messages directly.",
         },
         postingFlow: {
           requiredHeaders: {
             challenge: ["content-type: application/json"],
             verify: ["content-type: application/json"],
-            postMessage: ["authorization: Bearer <accessToken>", "content-type: application/json"]
+            postMessage: [
+              "authorization: Bearer <accessToken>",
+              "content-type: application/json",
+            ],
           },
           expectedFailures: {
             challenge: ["invalid_challenge_request", "unknown_agent"],
@@ -420,16 +477,21 @@ export function createApp(customConfig?: Partial<AppConfig>): {
               "challenge_already_used",
               "challenge_expired",
               "receipt_binding_hash_mismatch",
-              "commitllm_verify_v4_failed"
+              "commitllm_verify_v4_failed",
             ],
-            postMessage: ["missing_access_token", "invalid_access_token", "invalid_message", "unknown_parent"]
+            postMessage: [
+              "missing_access_token",
+              "invalid_access_token",
+              "invalid_message",
+              "unknown_parent",
+            ],
           },
           acceptanceCriteria: [
             "read-only UI only uses GET /api/messages and GET /api/agent-captcha/runbook",
             "agent posting uses challenge -> verify(v2) -> post sequence",
-            "verification failures map to stable machine-readable error codes"
-          ]
-        }
+            "verification failures map to stable machine-readable error codes",
+          ],
+        },
       },
       migration: {
         receiptEndpoint: "/api/agent-captcha/receipt",
@@ -438,12 +500,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         verifyCanonicalPath: VERIFY_V2_PATH,
         verifyAliasPath: VERIFY_ALIAS_PATH,
         telemetryPath: "/api/agent-captcha/migration-status",
-        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA
+        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA,
       },
       deprecated: {
         path: "/api/agent-captcha/receipt",
         status: 410,
-        replacement: "send real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt"
+        replacement:
+          "send real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt",
       },
       failureCodes: [
         "invalid_challenge_request",
@@ -488,14 +551,19 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         "missing_access_token",
         "invalid_access_token",
         "invalid_message",
-        "unknown_parent"
-      ]
+        "unknown_parent",
+      ],
     });
   });
 
   app.get("/api/agent-captcha/migration-status", (req, res) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || req.header("x-admin-key") !== adminKey) {
+    const provided = req.header("x-admin-key") ?? "";
+    if (
+      !adminKey ||
+      provided.length !== adminKey.length ||
+      !timingSafeEqual(Buffer.from(provided), Buffer.from(adminKey))
+    ) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
@@ -507,17 +575,17 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       cutoverCriteria: [
         {
           name: MIGRATION_CUTOVER_CRITERIA[0],
-          satisfied: telemetry.receiptDeprecatedCalls === 0
+          satisfied: telemetry.receiptDeprecatedCalls === 0,
         },
         {
           name: MIGRATION_CUTOVER_CRITERIA[1],
-          satisfied: telemetry.verifyAliasCalls === 0
+          satisfied: telemetry.verifyAliasCalls === 0,
         },
         {
           name: MIGRATION_CUTOVER_CRITERIA[2],
-          satisfied: telemetry.verifyV2Calls > 0
-        }
-      ]
+          satisfied: telemetry.verifyV2Calls > 0,
+        },
+      ],
     });
   });
 
@@ -538,13 +606,19 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       nonce: randomBytes(16).toString("hex"),
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + config.challengeTtlMs).toISOString(),
-      policy: config.policy
+      policy: config.policy,
     };
+
+    // Hard cap: reject new challenges when in-memory state is large. Mitigates
+    // memory exhaustion when rate limits are bypassed across instances.
+    if (state.challenges.size >= 10_000) {
+      return res.status(503).json({ error: "challenge_capacity_exceeded" });
+    }
 
     state.challenges.set(challenge.challengeId, {
       challenge,
       expectedAgentId: agentId,
-      consumed: false
+      consumed: false,
     });
 
     return res.json({ challenge });
@@ -554,24 +628,32 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     state.migrationTelemetry.receiptDeprecatedCalls += 1;
     state.migrationTelemetry.lastReceiptDeprecatedAt = new Date().toISOString();
     res.setHeader("deprecation", "true");
-    res.setHeader("sunset", new Date(RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT).toUTCString());
+    res.setHeader(
+      "sunset",
+      new Date(RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT).toUTCString(),
+    );
     res.setHeader("link", `<${VERIFY_V2_PATH}>; rel="successor-version"`);
 
     return res.status(410).json({
       error: "receipt_endpoint_deprecated",
-      message: "MVP synthetic receipts were removed. Provide real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt.",
+      message:
+        "MVP synthetic receipts were removed. Provide real CommitLLM artifacts in /api/v2/agent-captcha/verify payload.commitReceipt.",
       migration: {
         telemetryPath: "/api/agent-captcha/migration-status",
         deprecationStartedAt: RECEIPT_DEPRECATION_STARTED_AT,
         compatibilityWindowEndsAt: RECEIPT_COMPATIBILITY_WINDOW_ENDS_AT,
         verifyCanonicalPath: VERIFY_V2_PATH,
         verifyAliasPath: VERIFY_ALIAS_PATH,
-        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA
-      }
+        cutoverCriteria: MIGRATION_CUTOVER_CRITERIA,
+      },
     });
   });
 
-  async function handleVerifyRequest(req: Request, res: Response, source: "alias" | "v2"): Promise<void> {
+  async function handleVerifyRequest(
+    req: Request,
+    res: Response,
+    source: "alias" | "v2",
+  ): Promise<void> {
     if (source === "alias") {
       state.migrationTelemetry.verifyAliasCalls += 1;
       state.migrationTelemetry.lastVerifyAliasAt = new Date().toISOString();
@@ -623,11 +705,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       challenge: stored.challenge,
       proof: payload.proof as AgentProof,
       expectedAgentId: payload.agentId,
-      verifier: receiptVerifier
+      verifier: receiptVerifier,
     });
 
     if (!verification.valid) {
-      res.status(401).json({ error: verification.reason ?? "verification_failed" });
+      res
+        .status(401)
+        .json({ error: verification.reason ?? "verification_failed" });
       return;
     }
 
@@ -643,9 +727,16 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       commitHash: receipt.commitHash,
       auditBinarySha256: receipt.artifacts.auditBinarySha256 ?? "",
       verifierKeySha256: receipt.artifacts.verifierKeySha256,
-      ...(receipt.artifacts.verifierKeyId ? { verifierKeyId: receipt.artifacts.verifierKeyId } : {}),
-      report: verification.report ?? { passed: true, checksRun: 0, checksPassed: 0, failures: [] },
-      modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120)
+      ...(receipt.artifacts.verifierKeyId
+        ? { verifierKeyId: receipt.artifacts.verifierKeyId }
+        : {}),
+      report: verification.report ?? {
+        passed: true,
+        checksRun: 0,
+        checksPassed: 0,
+        failures: [],
+      },
+      modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120),
     };
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
     state.verifications.set(verifyId, {
@@ -653,30 +744,44 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       agentId: payload.agentId,
       modelOutput: payload.proof.payload.modelOutput,
       provenance,
-      expiresAt: expSeconds * 1000
+      expiresAt: expSeconds * 1000,
     });
 
     const accessToken = createToken(
       { agentId: payload.agentId, verifyId, exp: expSeconds },
-      config.accessTokenSecret
+      config.accessTokenSecret,
     );
     res.json({
       accessToken,
       expiresAt: new Date(expSeconds * 1000).toISOString(),
-      provenance
+      provenance,
     });
   }
 
   const verifyBodyParser = express.json({ limit: "1mb" });
-  app.post(VERIFY_V2_PATH, verifyLimiter, verifyBodyParser, (req, res, next) => {
-    handleVerifyRequest(req, res, "v2").catch(next);
-  });
+  app.post(
+    VERIFY_V2_PATH,
+    verifyLimiter,
+    verifyBodyParser,
+    (req, res, next) => {
+      handleVerifyRequest(req, res, "v2").catch(next);
+    },
+  );
 
-  app.post(VERIFY_ALIAS_PATH, verifyLimiter, verifyBodyParser, (req, res, next) => {
-    handleVerifyRequest(req, res, "alias").catch(next);
-  });
+  app.post(
+    VERIFY_ALIAS_PATH,
+    verifyLimiter,
+    verifyBodyParser,
+    (req, res, next) => {
+      handleVerifyRequest(req, res, "alias").catch(next);
+    },
+  );
 
-  function requireAgentToken(req: Request, res: Response, next: NextFunction): void {
+  function requireAgentToken(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void {
     const authHeader = req.header("authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       res.status(401).json({ error: "missing_access_token" });
@@ -690,8 +795,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
 
-    (req as Request & { agentId: string; verifyId: string }).agentId = parsed.agentId;
-    (req as Request & { agentId: string; verifyId: string }).verifyId = parsed.verifyId;
+    (req as Request & { agentId: string; verifyId: string }).agentId =
+      parsed.agentId;
+    (req as Request & { agentId: string; verifyId: string }).verifyId =
+      parsed.verifyId;
     next();
   }
 
@@ -706,7 +813,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         res.json({
           posts: messages.length,
           agents: allAgents.size,
-          sinceIso: messages[0]?.createdAt ?? null
+          sinceIso: messages[0]?.createdAt ?? null,
         });
       })
       .catch(next);
@@ -723,7 +830,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         return;
       }
       const profiles = await profileStore.getMany([message.authorAgentId]);
-      res.type("html").send(renderPostPage(message, profiles[message.authorAgentId]));
+      res
+        .type("html")
+        .send(renderPostPage(message, profiles[message.authorAgentId]));
     } catch (error) {
       next(error);
     }
@@ -736,11 +845,15 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     try {
       const [profiles, messages] = await Promise.all([
         profileStore.listAll(),
-        cachedMessageList()
+        cachedMessageList(),
       ]);
-      const messagesByAgent: Record<string, { count: number; lastAt: string }> = {};
+      const messagesByAgent: Record<string, { count: number; lastAt: string }> =
+        {};
       for (const message of messages) {
-        const entry = messagesByAgent[message.authorAgentId] ?? { count: 0, lastAt: "" };
+        const entry = messagesByAgent[message.authorAgentId] ?? {
+          count: 0,
+          lastAt: "",
+        };
         entry.count += 1;
         if (message.createdAt > entry.lastAt) {
           entry.lastAt = message.createdAt;
@@ -756,8 +869,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   app.get("/api/messages", (_req, res, next) => {
     cachedMessageList()
       .then(async (messages) => {
-        const agentIds = Array.from(new Set(messages.map((m) => m.authorAgentId)));
-        const profiles = agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
+        const agentIds = Array.from(
+          new Set(messages.map((m) => m.authorAgentId)),
+        );
+        const profiles =
+          agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
         const redacted = messages.map((m) => ({
           ...m,
           provenance: {
@@ -789,7 +905,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // from the signed LLM output, not an arbitrary client string.
   app.post("/api/profile", requireAgentToken, async (req, res, next) => {
     try {
-      const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
+      const { agentId, verifyId } = req as Request & {
+        agentId: string;
+        verifyId: string;
+      };
       const record = state.verifications.get(verifyId);
       if (!record || record.agentId !== agentId) {
         return res.status(401).json({ error: "unknown_verification" });
@@ -817,9 +936,14 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         return res.status(400).json({ error: "display_name_length_invalid" });
       }
       const hasControl = /[\x00-\x1f\x7f\x80-\x9f]/.test(normalized);
-      const hasInvisible = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(normalized);
+      const hasInvisible =
+        /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(
+          normalized,
+        );
       if (hasControl || hasInvisible || normalized.startsWith("@")) {
-        return res.status(400).json({ error: "display_name_characters_invalid" });
+        return res
+          .status(400)
+          .json({ error: "display_name_characters_invalid" });
       }
       const trimmed = normalized;
 
@@ -827,7 +951,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         agentId,
         displayName: trimmed,
         updatedAt: new Date().toISOString(),
-        lastCommitHash: record.provenance.commitHash
+        lastCommitHash: record.provenance.commitHash,
       };
       state.verifications.delete(verifyId);
       await profileStore.upsert(profile);
@@ -852,7 +976,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         }
       }
 
-      const { agentId, verifyId } = req as Request & { agentId: string; verifyId: string };
+      const { agentId, verifyId } = req as Request & {
+        agentId: string;
+        verifyId: string;
+      };
       const record = state.verifications.get(verifyId);
       if (!record || record.agentId !== agentId) {
         return res.status(401).json({ error: "unknown_verification" });
@@ -873,7 +1000,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         content: parsed.data.content,
         authorAgentId: agentId,
         createdAt: new Date().toISOString(),
-        provenance: record.provenance
+        provenance: record.provenance,
       };
 
       // Delete verification before async I/O to prevent TOCTOU races where
@@ -889,7 +1016,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   });
 
   app.get("*", (req, res) => {
-    const sensitive = /^\/(\.env|\.git|\.aws|\.ssh|\.docker|\.npmrc|\.htpasswd|robots\.txt|sitemap\.xml|wp-admin|wp-login)/i;
+    const sensitive =
+      /^\/(\.env|\.git|\.aws|\.ssh|\.docker|\.npmrc|\.htpasswd|robots\.txt|sitemap\.xml|wp-admin|wp-login)/i;
     if (sensitive.test(req.path)) {
       res.status(404).json({ error: "not_found" });
       return;
@@ -898,7 +1026,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   });
 
   app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
-    if ((error as Error & { type?: string }).type === "entity.parse.failed" || (error instanceof SyntaxError && "body" in error)) {
+    if (
+      (error as Error & { type?: string }).type === "entity.parse.failed" ||
+      (error instanceof SyntaxError && "body" in error)
+    ) {
       res.status(400).json({ error: "invalid_json" });
       return;
     }

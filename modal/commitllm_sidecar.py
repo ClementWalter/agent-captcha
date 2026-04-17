@@ -16,6 +16,7 @@ server config.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 
@@ -41,7 +42,9 @@ MODEL_ID = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
 KEY_SEED = hashlib.sha256(f"agent-captcha-commitllm-v1::{MODEL_ID}".encode()).digest()
 
 # Modal volume caches the model + verifier key between cold starts.
-model_cache = modal.Volume.from_name("agent-captcha-commitllm-cache", create_if_missing=True)
+model_cache = modal.Volume.from_name(
+    "agent-captcha-commitllm-cache", create_if_missing=True
+)
 CACHE_DIR = "/cache"
 
 app = modal.App("agent-captcha-commitllm")
@@ -49,21 +52,27 @@ app = modal.App("agent-captcha-commitllm")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install(
-        "git", "curl", "build-essential", "pkg-config", "libssl-dev",
+        "git",
+        "curl",
+        "build-essential",
+        "pkg-config",
+        "libssl-dev",
         "ca-certificates",
     )
     # Rust toolchain required to build verilm_rs (PyO3 crate).
     .run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable",
     )
-    .env({
-        "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        # vLLM V1 engine spawns worker subprocesses that confuse our capture counter.
-        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-        "VERILM_CAPTURE": "1",
-        "VERILM_CAPTURE_X_ATTN": "1",
-        "HF_HOME": f"{CACHE_DIR}/hf",
-    })
+    .env(
+        {
+            "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            # vLLM V1 engine spawns worker subprocesses that confuse our capture counter.
+            "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+            "VERILM_CAPTURE": "1",
+            "VERILM_CAPTURE_X_ATTN": "1",
+            "HF_HOME": f"{CACHE_DIR}/hf",
+        }
+    )
     .pip_install(*VERIFICATION, *EXTRA)
     # Clone CommitLLM upstream and build both the Python sidecar and the Rust
     # verifier crate. Pinned to main for now; swap to a tag once upstream cuts
@@ -104,9 +113,8 @@ def fastapi_app():
     from fastapi.responses import JSONResponse
     from huggingface_hub import snapshot_download
     from starlette.middleware.base import BaseHTTPMiddleware
-    from vllm import LLM
-
     from verilm.server import create_app as create_verilm_app
+    from vllm import LLM
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("agent_captcha.sidecar")
@@ -121,15 +129,20 @@ def fastapi_app():
 
         /health is exempt so Modal's health probes still work.
         """
+
         async def dispatch(self, request: Request, call_next):
             if request.url.path == "/health":
                 return await call_next(request)
             if not sidecar_api_key:
                 # No key configured — skip auth (backward compat during rollout)
                 return await call_next(request)
-            if request.headers.get("x-sidecar-key") != sidecar_api_key:
+            provided = request.headers.get("x-sidecar-key", "")
+            if not hmac.compare_digest(provided, sidecar_api_key):
                 return JSONResponse(
-                    {"error": "unauthorized", "detail": "missing or invalid x-sidecar-key"},
+                    {
+                        "error": "unauthorized",
+                        "detail": "missing or invalid x-sidecar-key",
+                    },
                     status_code=401,
                 )
             return await call_next(request)
@@ -158,6 +171,7 @@ def fastapi_app():
     # from our own endpoints without going through HTTP (avoids cross-container
     # routing bugs when Modal scales to >1 container).
     from verilm.server import VerifiedInferenceServer
+
     server = VerifiedInferenceServer(llm)
 
     # Also mount the upstream app for backward compat (/v1/chat, /v1/audit).
@@ -203,17 +217,22 @@ def fastapi_app():
             binary=True,
         )
 
-        chat_result["audit_binary_base64"] = base64.b64encode(bytes(audit_binary)).decode()
+        chat_result["audit_binary_base64"] = base64.b64encode(
+            bytes(audit_binary)
+        ).decode()
         return chat_result
 
     @app.get("/health")
     def health():
+        # Why: only return liveness — no model identity or config to avoid recon.
         return {"status": "ok"}
 
     # Canonicalize once so the hash is stable across containers regardless of
     # key serialization order (verilm_rs.generate_key returns JSON bytes whose
     # key ordering depends on the crate version).
-    canonical_key_json = json.dumps(json.loads(verifier_key_json), sort_keys=True, separators=(",", ":"))
+    canonical_key_json = json.dumps(
+        json.loads(verifier_key_json), sort_keys=True, separators=(",", ":")
+    )
     verifier_key_sha256 = hashlib.sha256(canonical_key_json.encode()).hexdigest()
     verifier_key_id = f"{MODEL_ID}::seed={KEY_SEED.hex()[:16]}"
 
@@ -226,12 +245,14 @@ def fastapi_app():
         ship it over the wire. Clients bind to it by hash; verification runs
         inside this container using the cached copy.
         """
-        return JSONResponse({
-            "model": MODEL_ID,
-            "verifier_key_sha256": verifier_key_sha256,
-            "verifier_key_id": verifier_key_id,
-            "key_seed_hex": KEY_SEED.hex(),
-        })
+        return JSONResponse(
+            {
+                "model": MODEL_ID,
+                "verifier_key_sha256": verifier_key_sha256,
+                "verifier_key_id": verifier_key_id,
+                "key_seed_hex": KEY_SEED.hex(),
+            }
+        )
 
     @app.post("/verify")
     def verify(body: dict):
@@ -252,7 +273,9 @@ def fastapi_app():
 
         audit_binary_b64 = body.get("audit_binary_base64")
         if not isinstance(audit_binary_b64, str):
-            return JSONResponse({"ok": False, "error": "missing_audit_binary_base64"}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": "missing_audit_binary_base64"}, status_code=400
+            )
         audit_binary = base64.b64decode(audit_binary_b64)
 
         try:
@@ -300,7 +323,11 @@ def fastapi_app():
                     },
                     status_code=400,
                 )
-            actual_output_hash = audit_meta.get("output_hash", "") if isinstance(audit_meta, dict) else ""
+            actual_output_hash = (
+                audit_meta.get("output_hash", "")
+                if isinstance(audit_meta, dict)
+                else ""
+            )
             if not actual_output_hash:
                 return JSONResponse(
                     {
