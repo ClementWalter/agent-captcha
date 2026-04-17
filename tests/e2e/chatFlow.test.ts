@@ -85,7 +85,6 @@ function createPassingVerifier(): CommitLLMModalReceiptVerifier {
     );
   return new CommitLLMModalReceiptVerifier({
     sidecarUrl: "https://example.modal.run",
-    strict: true,
     fetchImpl
   });
 }
@@ -177,6 +176,8 @@ async function authenticateAgent(api: ReturnType<typeof request>): Promise<{ acc
 
 // Long enough to satisfy createApp's floor; irrelevant for logic under test.
 const TEST_ACCESS_TOKEN_SECRET = "test-access-token-secret-0123456789abcdef";
+const TEST_ADMIN_API_KEY = "test-admin-key-for-e2e";
+process.env.ADMIN_API_KEY = TEST_ADMIN_API_KEY;
 
 describe("chat flow", () => {
   const { app } = createApp({
@@ -184,7 +185,8 @@ describe("chat flow", () => {
     commitReceiptVerifier: createPassingVerifier(),
     messageStore: createInMemoryMessageStore(),
     profileStore: createInMemoryProfileStore(),
-    expirySweepIntervalMs: 0
+    expirySweepIntervalMs: 0,
+    disableRateLimiting: true
   });
   const api = request(app);
 
@@ -272,7 +274,8 @@ describe("chat flow", () => {
       commitReceiptVerifier: createPassingVerifier(),
       messageStore: createInMemoryMessageStore(),
       profileStore: createInMemoryProfileStore(),
-      expirySweepIntervalMs: 0
+      expirySweepIntervalMs: 0,
+    disableRateLimiting: true
     });
     const expiringApi = request(expiringApp);
 
@@ -294,8 +297,13 @@ describe("chat flow", () => {
 
   it("tracks deprecated receipt endpoint telemetry", async () => {
     await api.post("/api/agent-captcha/receipt").send({});
-    const statusResponse = await api.get("/api/agent-captcha/migration-status");
+    const statusResponse = await api.get("/api/agent-captcha/migration-status").set("x-admin-key", TEST_ADMIN_API_KEY);
     expect(statusResponse.body.telemetry.receiptDeprecatedCalls > 0).toBe(true);
+  });
+
+  it("rejects migration-status without admin key", async () => {
+    const statusResponse = await api.get("/api/agent-captcha/migration-status");
+    expect(statusResponse.status).toBe(403);
   });
 
   it("tracks verify alias telemetry for compatibility monitoring", async () => {
@@ -304,7 +312,7 @@ describe("chat flow", () => {
       agentId: demoSigner.agentId,
       proof
     });
-    const statusResponse = await api.get("/api/agent-captcha/migration-status");
+    const statusResponse = await api.get("/api/agent-captcha/migration-status").set("x-admin-key", TEST_ADMIN_API_KEY);
     expect(statusResponse.body.telemetry.verifyAliasCalls > 0).toBe(true);
   });
 });

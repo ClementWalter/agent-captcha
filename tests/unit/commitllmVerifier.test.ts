@@ -86,10 +86,9 @@ function fetchReturning(response: CommitLLMModalVerifyResponse, status = 200): t
   }) as typeof fetch;
 }
 
-function makeVerifier(fetchImpl: typeof fetch, strict = true): CommitLLMModalReceiptVerifier {
+function makeVerifier(fetchImpl: typeof fetch): CommitLLMModalReceiptVerifier {
   return new CommitLLMModalReceiptVerifier({
     sidecarUrl: "https://example.modal.run",
-    strict,
     fetchImpl
   });
 }
@@ -134,54 +133,39 @@ describe("commitllm modal verifier", () => {
     expect(result.reason).toBe("commitllm_modal_verify_v4_binary_failed");
   });
 
-  it("rejects failing verify_v4 reports in strict mode", async () => {
+  it("rejects failing verify_v4 reports", async () => {
     const receipt = buildReceipt();
     const verifier = makeVerifier(fetchReturning({
       ok: true,
       audit_binary_sha256: receipt.artifacts.auditBinarySha256,
       report: { passed: false, checks_run: 5, checks_passed: 3, failures: ["tampered"] }
-    }), true);
+    }));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
     expect(result.reason).toBe("commitllm_verify_v4_failed");
   });
 
-  it("accepts non-passing reports in non-strict mode when checks ran", async () => {
+  it("rejects reports with high pass rate but passed=false", async () => {
     const receipt = buildReceipt();
     const verifier = makeVerifier(fetchReturning({
       ok: true,
       audit_binary_sha256: receipt.artifacts.auditBinarySha256,
       report: { passed: false, checks_run: 100, checks_passed: 90, failures: ["attn-bound"] }
-    }), false);
+    }));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 
-    expect(result.valid).toBe(true);
+    expect(result.reason).toBe("commitllm_verify_v4_failed");
   });
 
-  it("rejects low pass-rate reports in non-strict mode (crafted-binary defense)", async () => {
-    const receipt = buildReceipt();
-    // The original exploit: a 26-byte forged binary passed 1/8 checks.
-    // The old gate (checks_run > 0) accepted it. The new 90% threshold rejects it.
-    const verifier = makeVerifier(fetchReturning({
-      ok: true,
-      audit_binary_sha256: receipt.artifacts.auditBinarySha256,
-      report: { passed: false, checks_run: 8, checks_passed: 1, failures: ["forged"] }
-    }), false);
-
-    const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
-
-    expect(result.reason).toBe("commitllm_verify_v4_insufficient_pass_rate");
-  });
-
-  it("rejects empty reports even in non-strict mode", async () => {
+  it("rejects empty reports", async () => {
     const receipt = buildReceipt();
     const verifier = makeVerifier(fetchReturning({
       ok: true,
       audit_binary_sha256: receipt.artifacts.auditBinarySha256,
       report: { passed: true, checks_run: 0, checks_passed: 0 }
-    }), false);
+    }));
 
     const result = await verifier.verifyReceipt(receipt, buildExpected(receipt));
 

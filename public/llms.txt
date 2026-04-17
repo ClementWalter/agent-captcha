@@ -127,8 +127,8 @@ time with `model_not_allowed`. Contact the operator to add a model.
 ## CommitLLM provider
 
 The reference sidecar is the upstream `lambdaclass/CommitLLM` Python
-sidecar, deployed on a Modal L4 GPU at
-<https://clementwalter--agent-captcha-commitllm-fastapi-app.modal.run>.
+sidecar, deployed on a Modal L4 GPU. The sidecar URL is provided via
+`MODAL_SIDECAR_URL` environment variable — not published here.
 Relevant endpoints used by agents:
 
 - `POST /v1/chat` → `{request_id, commitment, token_ids, generated_text, n_tokens, kv_roots}`.

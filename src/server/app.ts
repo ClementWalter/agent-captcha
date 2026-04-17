@@ -5,6 +5,7 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import path from "path";
 import express, { type NextFunction, type Request, type Response } from "express";
+import rateLimit from "express-rate-limit";
 import cors from "cors";
 import pino from "pino";
 import { z } from "zod";
@@ -97,6 +98,8 @@ export interface AppConfig {
    * state.challenges / state.verifications bounded. Disable with 0 in tests.
    */
   expirySweepIntervalMs?: number;
+  /** Disable rate limiting (for tests only). */
+  disableRateLimiting?: boolean;
 }
 
 interface AppState {
@@ -258,6 +261,33 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   };
 
   const app = express();
+  app.set("trust proxy", 1);
+  app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Security-Policy", "default-src 'self'");
+    next();
+  });
+
+  const noopMiddleware = (_req: Request, _res: Response, next: NextFunction): void => { next(); };
+  const challengeLimiter = config.disableRateLimiting ? noopMiddleware : rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false }
+  });
+
+  const verifyLimiter = config.disableRateLimiting ? noopMiddleware : rateLimit({
+    windowMs: 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false }
+  });
+
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
     verifications: new Map<string, VerificationRecord>(),
@@ -280,6 +310,23 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   const messageStore: MessageStore = config.messageStore ?? createMessageStoreFromEnv();
   const profileStore: ProfileStore = config.profileStore ?? createProfileStoreFromEnv();
 
+  // TTL cache for S3 message listings to prevent fan-out amplification on
+  // unauthenticated read endpoints.
+  let messageCache: { data: ChatMessage[]; expiresAt: number } | null = null;
+  const MESSAGE_CACHE_TTL_MS = 30_000;
+  async function cachedMessageList(): Promise<ChatMessage[]> {
+    const now = Date.now();
+    if (messageCache && messageCache.expiresAt > now) {
+      return messageCache.data;
+    }
+    const messages = await messageStore.list();
+    messageCache = { data: messages, expiresAt: now + MESSAGE_CACHE_TTL_MS };
+    return messages;
+  }
+  function invalidateMessageCache(): void {
+    messageCache = null;
+  }
+
   // Scope CORS to the public origin(s). An allow-all cors() made the API
   // reachable with credentials from any hostile page (pre-prod audit #7).
   // Agent CLIs don't go through browsers, so this doesn't affect them.
@@ -296,9 +343,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       credentials: false
     })
   );
-  // Audit binaries from CommitLLM receipts can be a few MB — lift the default
-  // 100 KB body cap so verify proofs can be submitted inline.
-  app.use(express.json({ limit: "20mb" }));
+  const globalJsonParser = express.json({ limit: "256kb" });
+  app.use((req, res, next) => {
+    if (req.path === VERIFY_V2_PATH || req.path === VERIFY_ALIAS_PATH) {
+      return next();
+    }
+    globalJsonParser(req, res, next);
+  });
   app.use(express.static(path.resolve(process.cwd(), "public")));
 
   app.get("/api/health", (_req, res) => {
@@ -442,7 +493,12 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
   });
 
-  app.get("/api/agent-captcha/migration-status", (_req, res) => {
+  app.get("/api/agent-captcha/migration-status", (req, res) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    if (!adminKey || req.header("x-admin-key") !== adminKey) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
     const telemetry = state.migrationTelemetry;
     res.json({
       deprecationStartedAt: RECEIPT_DEPRECATION_STARTED_AT,
@@ -465,7 +521,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
   });
 
-  app.post("/api/agent-captcha/challenge", (req, res) => {
+  app.post("/api/agent-captcha/challenge", challengeLimiter, (req, res) => {
     const parsed = challengeRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: "invalid_challenge_request" });
@@ -589,7 +645,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       verifierKeySha256: receipt.artifacts.verifierKeySha256,
       ...(receipt.artifacts.verifierKeyId ? { verifierKeyId: receipt.artifacts.verifierKeyId } : {}),
       report: verification.report ?? { passed: true, checksRun: 0, checksPassed: 0, failures: [] },
-      modelOutputHint: payload.proof.payload.modelOutput
+      modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120)
     };
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
     state.verifications.set(verifyId, {
@@ -611,12 +667,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
   }
 
-  app.post(VERIFY_V2_PATH, (req, res) => {
-    void handleVerifyRequest(req, res, "v2");
+  const verifyBodyParser = express.json({ limit: "2mb" });
+  app.post(VERIFY_V2_PATH, verifyLimiter, verifyBodyParser, (req, res, next) => {
+    handleVerifyRequest(req, res, "v2").catch(next);
   });
 
-  app.post(VERIFY_ALIAS_PATH, (req, res) => {
-    void handleVerifyRequest(req, res, "alias");
+  app.post(VERIFY_ALIAS_PATH, verifyLimiter, verifyBodyParser, (req, res, next) => {
+    handleVerifyRequest(req, res, "alias").catch(next);
   });
 
   function requireAgentToken(req: Request, res: Response, next: NextFunction): void {
@@ -641,7 +698,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // Aggregate counts for the hero live counter. Cheap — we already list
   // messages on every thread render, so the cost is ~the same as /api/messages.
   app.get("/api/stats", (_req, res, next) => {
-    Promise.all([messageStore.list(), profileStore.listAll()])
+    Promise.all([cachedMessageList(), profileStore.listAll()])
       .then(([messages, profiles]) => {
         const fromMessages = new Set(messages.map((m) => m.authorAgentId));
         const fromProfiles = new Set(Object.keys(profiles));
@@ -659,7 +716,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // unfurl the card with the message content.
   app.get("/post/:id", async (req, res, next) => {
     try {
-      const messages = await messageStore.list();
+      const messages = await cachedMessageList();
       const message = messages.find((m) => m.id === req.params.id);
       if (!message) {
         res.status(404).type("html").send(renderNotFoundPage("Post"));
@@ -679,7 +736,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     try {
       const [profiles, messages] = await Promise.all([
         profileStore.listAll(),
-        messageStore.list()
+        cachedMessageList()
       ]);
       const messagesByAgent: Record<string, { count: number; lastAt: string }> = {};
       for (const message of messages) {
@@ -697,12 +754,22 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   });
 
   app.get("/api/messages", (_req, res, next) => {
-    messageStore
-      .list()
+    cachedMessageList()
       .then(async (messages) => {
         const agentIds = Array.from(new Set(messages.map((m) => m.authorAgentId)));
         const profiles = agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
-        res.json({ messages, profiles });
+        const redacted = messages.map((m) => ({
+          ...m,
+          provenance: {
+            ...m.provenance,
+            report: {
+              passed: m.provenance.report.passed,
+              checksRun: m.provenance.report.checksRun,
+              checksPassed: m.provenance.report.checksPassed,
+            },
+          },
+        }));
+        res.json({ messages: redacted, profiles });
       })
       .catch(next);
   });
@@ -762,8 +829,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         updatedAt: new Date().toISOString(),
         lastCommitHash: record.provenance.commitHash
       };
-      await profileStore.upsert(profile);
       state.verifications.delete(verifyId);
+      await profileStore.upsert(profile);
 
       return res.status(200).json({ profile });
     } catch (error) {
@@ -779,7 +846,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       }
 
       if (parsed.data.parentId) {
-        const existing = await messageStore.list();
+        const existing = await cachedMessageList();
         if (!existing.some((message) => message.id === parsed.data.parentId)) {
           return res.status(400).json({ error: "unknown_parent" });
         }
@@ -809,11 +876,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         provenance: record.provenance
       };
 
-      // Persist before deleting the verification record so a storage outage
-      // doesn't silently consume a valid token without posting. If the write
-      // throws, the client can retry with the same token until it succeeds.
-      await messageStore.append(message);
+      // Delete verification before async I/O to prevent TOCTOU races where
+      // concurrent requests reuse the same record for both profile and message.
       state.verifications.delete(verifyId);
+      await messageStore.append(message);
+      invalidateMessageCache();
 
       return res.status(201).json({ message });
     } catch (error) {
