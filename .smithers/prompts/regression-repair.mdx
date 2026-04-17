@@ -1,0 +1,14 @@
+The previous round of security fixes broke the e2e suite — a legitimate
+post can no longer land. Read the failing test output below and fix the
+regression by editing the relevant source files. Do not roll back the
+security improvements unless they are unambiguously the cause; instead,
+look for an over-tight rate limit, a missing whitelist for the test
+fixtures, an auth gate that should have a bypass for the e2e flow, etc.
+
+Keep the change minimal — fix only what's needed to make e2e green. If
+the test itself is the wrong shape (asserting against an old behaviour
+the security fix correctly changed), update the test instead.
+
+Failing e2e tail:
+
+{props.canaryReason}
