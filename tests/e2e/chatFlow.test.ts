@@ -124,11 +124,11 @@ function buildReceipt(challenge: AgentChallenge, modelOutputHash: string): Commi
   return receipt;
 }
 
-async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt?: Partial<CommitLLMReceipt> }) {
+async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt?: Partial<CommitLLMReceipt>; modelOutput?: string }) {
   const challengeResponse = await api.post("/api/agent-captcha/challenge").send({ agentId: demoSigner.agentId });
   const challenge = challengeResponse.body.challenge as AgentChallenge;
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
-  const modelOutput = `challenge=${challenge.challengeId};answer=${answer}`;
+  const modelOutput = overrides?.modelOutput ?? `challenge=${challenge.challengeId};answer=${answer}`;
 
   const modelOutputHash = computeOutputHash(modelOutput);
   const receipt = buildReceipt(challenge, modelOutputHash);
@@ -162,21 +162,30 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
     commitReceipt: mergedReceipt
   });
 
-  return { challenge, proof };
+  return { challenge, proof, modelOutput };
 }
 
-async function authenticateAgent(api: ReturnType<typeof request>): Promise<string> {
-  const { proof } = await issueProof(api);
+async function authenticateAgent(api: ReturnType<typeof request>): Promise<{ accessToken: string; modelOutput: string }> {
+  const { proof, modelOutput } = await issueProof(api);
   const verificationResponse = await api.post("/api/v2/agent-captcha/verify").send({
     agentId: demoSigner.agentId,
     proof
   });
 
-  return verificationResponse.body.accessToken as string;
+  return { accessToken: verificationResponse.body.accessToken as string, modelOutput };
 }
 
+// Long enough to satisfy createApp's floor; irrelevant for logic under test.
+const TEST_ACCESS_TOKEN_SECRET = "test-access-token-secret-0123456789abcdef";
+
 describe("chat flow", () => {
-  const { app } = createApp({ commitReceiptVerifier: createPassingVerifier(), messageStore: createInMemoryMessageStore(), profileStore: createInMemoryProfileStore() });
+  const { app } = createApp({
+    accessTokenSecret: TEST_ACCESS_TOKEN_SECRET,
+    commitReceiptVerifier: createPassingVerifier(),
+    messageStore: createInMemoryMessageStore(),
+    profileStore: createInMemoryProfileStore(),
+    expirySweepIntervalMs: 0
+  });
   const api = request(app);
 
   it("rejects messages without token", async () => {
@@ -185,13 +194,24 @@ describe("chat flow", () => {
   });
 
   it("accepts messages from verified agents", async () => {
-    const accessToken = await authenticateAgent(api);
+    const { accessToken, modelOutput } = await authenticateAgent(api);
     const response = await api
       .post("/api/messages")
       .set("authorization", `Bearer ${accessToken}`)
-      .send({ content: "hello from verified agent" });
+      .send({ content: modelOutput });
 
     expect(response.status).toBe(201);
+  });
+
+  it("rejects messages whose content was not signed", async () => {
+    const { accessToken } = await authenticateAgent(api);
+    const response = await api
+      .post("/api/messages")
+      .set("authorization", `Bearer ${accessToken}`)
+      .send({ content: "arbitrary attacker-chosen text" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("message_content_not_signed");
   });
 
   it("returns posted messages to all readers", async () => {
@@ -247,10 +267,12 @@ describe("chat flow", () => {
 
   it("rejects expired challenges", async () => {
     const { app: expiringApp } = createApp({
+      accessTokenSecret: TEST_ACCESS_TOKEN_SECRET,
       challengeTtlMs: 1,
       commitReceiptVerifier: createPassingVerifier(),
       messageStore: createInMemoryMessageStore(),
-      profileStore: createInMemoryProfileStore()
+      profileStore: createInMemoryProfileStore(),
+      expirySweepIntervalMs: 0
     });
     const expiringApi = request(expiringApp);
 

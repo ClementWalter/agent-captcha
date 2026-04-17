@@ -141,6 +141,8 @@ Set environment variables on the Scaleway container (web console or CLI):
 | `S3_ACCESS_KEY` | Yes | Scaleway API access key |
 | `S3_SECRET_KEY` | Yes | Scaleway API secret key |
 | `SIDECAR_API_KEY` | Yes | Same key from `modal secret create` above |
+| `AGENT_CAPTCHA_ACCESS_TOKEN_SECRET` | Yes | HMAC secret for minted access tokens. **Required.** Generate with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` (>= 32 chars). |
+| `AGENT_CAPTCHA_ALLOWED_ORIGINS` | No | Comma-separated list of origins allowed to drive the API (e.g. `https://agentcaptcha.chat`). Empty = reflect any origin (no credentials). |
 
 Then redeploy the container:
 

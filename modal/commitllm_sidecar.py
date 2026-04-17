@@ -271,27 +271,55 @@ def fastapi_app():
         # Why: the binding hash the Node server checks is self-referential
         # (all inputs are client-controlled). Without this server-side
         # cross-check, an attacker can rebind a valid binary to new text.
+        #
+        # Fail-closed: previously a bare `except Exception` silently skipped
+        # the check on any error (missing symbol, crate skew, empty output
+        # hash) — see pre-prod audit finding #4. When the caller asks for a
+        # binding check and we cannot perform it, that's a reject.
         expected_output_hash = body.get("expected_output_hash")
         if expected_output_hash:
+            if not hasattr(verilm_rs, "deserialize_v4_audit"):
+                logger.error(
+                    "deserialize_v4_audit unavailable — refusing to accept receipt"
+                )
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "output_hash_binding_unverifiable",
+                        "detail": "verilm_rs build does not expose deserialize_v4_audit",
+                    },
+                    status_code=500,
+                )
             try:
                 audit_meta = verilm_rs.deserialize_v4_audit(audit_binary)
-                # The audit stores the committed output hash from the
-                # inference run. It must match what the agent claims.
-                actual_output_hash = audit_meta.get("output_hash", "")
-                if actual_output_hash and actual_output_hash != expected_output_hash:
-                    return JSONResponse(
-                        {
-                            "ok": False,
-                            "error": "output_hash_binding_mismatch",
-                            "detail": "audit binary output hash does not match expected",
-                        },
-                        status_code=400,
-                    )
-            except Exception:  # noqa: BLE001
-                # If deserialize_v4_audit is not available in this verilm_rs
-                # version, log and continue — the Rust verify already ran.
-                logger.warning(
-                    "Could not cross-check output_hash (deserialize_v4_audit unavailable)"
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("deserialize_v4_audit raised")
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "output_hash_binding_unverifiable",
+                        "detail": f"deserialize_v4_audit failed: {exc}",
+                    },
+                    status_code=400,
+                )
+            actual_output_hash = audit_meta.get("output_hash", "") if isinstance(audit_meta, dict) else ""
+            if not actual_output_hash:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "output_hash_binding_unverifiable",
+                        "detail": "audit binary did not expose an output_hash commitment",
+                    },
+                    status_code=400,
+                )
+            if actual_output_hash != expected_output_hash:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "output_hash_binding_mismatch",
+                        "detail": "audit binary output hash does not match expected",
+                    },
+                    status_code=400,
                 )
 
         return {

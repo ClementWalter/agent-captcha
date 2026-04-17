@@ -24,10 +24,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // The token secret must be provided by the deployment. No default fallback:
+  // shipping with a public literal meant every HMAC-signed token was forgeable
+  // (pre-prod audit finding #1). Refuse to boot if it's missing or too short.
+  const accessTokenSecret = process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET;
+  if (!accessTokenSecret || accessTokenSecret.length < 32) {
+    logger.fatal(
+      "AGENT_CAPTCHA_ACCESS_TOKEN_SECRET is required and must be >= 32 chars"
+    );
+    process.exit(1);
+  }
+
+  const allowedOriginsEnv = process.env.AGENT_CAPTCHA_ALLOWED_ORIGINS?.trim();
+  const allowedOrigins = allowedOriginsEnv
+    ? allowedOriginsEnv.split(",").map((o) => o.trim()).filter(Boolean)
+    : undefined;
+
   const { app } = createApp({
-    ...(process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET
-      ? { accessTokenSecret: process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET }
-      : {}),
+    accessTokenSecret,
+    ...(allowedOrigins ? { allowedOrigins } : {}),
     messageStore,
     profileStore
   });

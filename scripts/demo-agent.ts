@@ -287,9 +287,16 @@ async function run(): Promise<void> {
   }
   logger.info({ inferenceMs: Date.now() - chatTimer, generated: infer.generated_text.slice(0, 80) }, "inference done");
 
-  const fullOutput = infer.generated_text;
-  const modelOutputHash = computeOutputHash(fullOutput);
-  const modelOutput = trimToTweet(fullOutput.trim());
+  // The server requires `content === signed modelOutput` — binding the
+  // posted text to the audit receipt. We therefore sign exactly what we
+  // post: the trimmed tweet. trimToTweet is a no-op when the LLM already
+  // complies with the <280 char system prompt, so Qwen's full answer is
+  // usually signed as-is.
+  const modelOutput = trimToTweet(infer.generated_text.trim());
+  if (cliArgs.mode === "post" && modelOutput.length < 1) {
+    throw new Error("model output is empty after trim");
+  }
+  const modelOutputHash = computeOutputHash(modelOutput);
   const auditBinaryBase64 = infer.audit_binary_base64;
 
   // 4. Fetch the verifier key identity (SHA256 only — full key is ~1GB).
@@ -332,7 +339,7 @@ async function run(): Promise<void> {
   const proof = await createAgentProof({
     challenge,
     signer: signer,
-    modelOutput: infer.generated_text,
+    modelOutput,
     model,
     auditMode,
     commitReceipt

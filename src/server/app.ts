@@ -64,7 +64,12 @@ interface StoredChallenge {
 interface VerificationRecord {
   verifyId: string;
   agentId: string;
+  // The exact string the agent signed. POST /api/messages requires that the
+  // posted content equals this verbatim — otherwise an attacker with a single
+  // real inference could mint verified posts with arbitrary text.
+  modelOutput: string;
   provenance: MessageProvenance;
+  expiresAt: number;
 }
 
 interface AgentTokenPayload {
@@ -81,6 +86,17 @@ export interface AppConfig {
   commitReceiptVerifier?: CommitReceiptVerifier;
   messageStore?: MessageStore;
   profileStore?: ProfileStore;
+  /**
+   * Allowed CORS origins. Empty or undefined ⇒ reflect the request origin but
+   * without credentials (default express cors behaviour). Prefer setting this
+   * explicitly in production so only the known public origin can drive the API.
+   */
+  allowedOrigins?: string[];
+  /**
+   * Expiry sweep cadence for the in-memory state. Keeps
+   * state.challenges / state.verifications bounded. Disable with 0 in tests.
+   */
+  expirySweepIntervalMs?: number;
 }
 
 interface AppState {
@@ -197,25 +213,44 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
   }
 }
 
-const defaultConfig: AppConfig = {
+const defaultConfig: Omit<AppConfig, "accessTokenSecret"> = {
   // Modal cold-start for CommitLLM sidecar (vLLM boot + model load) can take
   // 2-4 min. Inference itself can be 10-60s for long posts. Keep challenge
   // lifetime well above the sum so clients don't hit challenge_expired.
   challengeTtlMs: 20 * 60 * 1000,
   tokenTtlMs: 15 * 60 * 1000,
-  accessTokenSecret: "demo-agent-token-secret",
   policy: {
     allowedModels: ["llama-3.1-8b-w8a8", "qwen2.5-7b-w8a8"],
     allowedAuditModes: ["routine", "deep"],
     requiresCommitReceipt: true,
     maxChallengeAgeMs: 20 * 60 * 1000
   },
+  // Sweep expired challenges / verifications every minute. The old code never
+  // cleared them, letting state.challenges grow without bound on a public
+  // unauthenticated endpoint (pre-prod audit finding #6).
+  expirySweepIntervalMs: 60 * 1000
 };
 
-export function createApp(customConfig?: Partial<AppConfig>): { app: express.Express; config: AppConfig } {
+export function createApp(customConfig?: Partial<AppConfig>): {
+  app: express.Express;
+  config: AppConfig;
+  stop: () => void;
+} {
+  // accessTokenSecret MUST be provided explicitly — no fallback. Shipping with
+  // a default string meant every forged HMAC passed token verification, so the
+  // only remaining gate was the in-memory verifyId lookup (pre-prod audit
+  // finding #1). Refuse to boot without one.
+  const accessTokenSecret = customConfig?.accessTokenSecret;
+  if (!accessTokenSecret || accessTokenSecret.length < 32) {
+    throw new Error(
+      "accessTokenSecret is required and must be at least 32 chars; set AGENT_CAPTCHA_ACCESS_TOKEN_SECRET"
+    );
+  }
+
   const config: AppConfig = {
     ...defaultConfig,
     ...customConfig,
+    accessTokenSecret,
     policy: {
       ...defaultConfig.policy,
       ...customConfig?.policy
@@ -245,7 +280,22 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
   const messageStore: MessageStore = config.messageStore ?? createMessageStoreFromEnv();
   const profileStore: ProfileStore = config.profileStore ?? createProfileStoreFromEnv();
 
-  app.use(cors());
+  // Scope CORS to the public origin(s). An allow-all cors() made the API
+  // reachable with credentials from any hostile page (pre-prod audit #7).
+  // Agent CLIs don't go through browsers, so this doesn't affect them.
+  const allowedOrigins = config.allowedOrigins?.length ? config.allowedOrigins : null;
+  app.use(
+    cors({
+      origin: (origin, cb) => {
+        // Non-browser clients (no Origin header): allow — the API is token-gated.
+        if (!origin) return cb(null, true);
+        if (!allowedOrigins) return cb(null, true);
+        if (allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(null, false);
+      },
+      credentials: false
+    })
+  );
   // Audit binaries from CommitLLM receipts can be a few MB — lift the default
   // 100 KB body cap so verify proofs can be submitted inline.
   app.use(express.json({ limit: "20mb" }));
@@ -507,6 +557,12 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       return;
     }
 
+    // Burn the challenge BEFORE the remote verify await — otherwise N
+    // concurrent requests carrying the same proof all pass the `consumed`
+    // check while the sidecar call (~100-3000ms) is in flight, each minting a
+    // fresh verifyId + accessToken (pre-prod audit finding #3).
+    stored.consumed = true;
+
     const verification = await verifyAgentProof({
       challenge: stored.challenge,
       proof: payload.proof as AgentProof,
@@ -535,10 +591,15 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       report: verification.report ?? { passed: true, checksRun: 0, checksPassed: 0, failures: [] },
       modelOutputHint: payload.proof.payload.modelOutput
     };
-    state.verifications.set(verifyId, { verifyId, agentId: payload.agentId, provenance });
-
-    stored.consumed = true;
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
+    state.verifications.set(verifyId, {
+      verifyId,
+      agentId: payload.agentId,
+      modelOutput: payload.proof.payload.modelOutput,
+      provenance,
+      expiresAt: expSeconds * 1000
+    });
+
     const accessToken = createToken(
       { agentId: payload.agentId, verifyId, exp: expSeconds },
       config.accessTokenSecret
@@ -668,7 +729,7 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       }
 
       // The signed modelOutput must be parseable as JSON with a `name` field.
-      const modelOutput = record.provenance.modelOutputHint ?? "";
+      const modelOutput = record.modelOutput;
       let parsedOutput: unknown;
       try {
         parsedOutput = JSON.parse(modelOutput);
@@ -679,14 +740,21 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
       if (typeof candidate !== "string") {
         return res.status(400).json({ error: "model_output_missing_name" });
       }
-      const trimmed = candidate.trim();
-      if (trimmed.length < 1 || trimmed.length > 40) {
+      // Unicode NFC + trim. Reject anything that survives as:
+      // - control characters (C0 / C1 / DEL) — UI breakage + log injection.
+      // - zero-width / bidi / invisible separators — impersonation by
+      //   rendering identically to an existing name (pre-prod audit #5).
+      // - leading '@' — impersonation framing ("@official").
+      const normalized = candidate.normalize("NFC").trim();
+      if (normalized.length < 1 || normalized.length > 40) {
         return res.status(400).json({ error: "display_name_length_invalid" });
       }
-      // No control characters, no @ (avoid impersonation framing).
-      if (/[\x00-\x1f\x7f]/.test(trimmed) || trimmed.startsWith("@")) {
+      const hasControl = /[\x00-\x1f\x7f\x80-\x9f]/.test(normalized);
+      const hasInvisible = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(normalized);
+      if (hasControl || hasInvisible || normalized.startsWith("@")) {
         return res.status(400).json({ error: "display_name_characters_invalid" });
       }
+      const trimmed = normalized;
 
       const profile: AgentProfile = {
         agentId,
@@ -723,6 +791,15 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
         return res.status(401).json({ error: "unknown_verification" });
       }
 
+      // Bind the post body to the signed modelOutput. Without this the
+      // CommitLLM receipt only proves that *some* inference ran — not that
+      // the text displayed in the thread is what the model produced
+      // (pre-prod audit finding #2). The receipt's provenance is displayed
+      // next to `content`, so `content` must equal what was signed.
+      if (parsed.data.content !== record.modelOutput) {
+        return res.status(400).json({ error: "message_content_not_signed" });
+      }
+
       const message: ChatMessage = {
         id: randomUUID(),
         parentId: parsed.data.parentId ?? null,
@@ -753,5 +830,34 @@ export function createApp(customConfig?: Partial<AppConfig>): { app: express.Exp
     res.status(500).json({ error: "internal_error" });
   });
 
-  return { app, config };
+  // Periodic sweep of expired challenges / verifications so unused entries
+  // don't accumulate forever on the 1GB container (pre-prod audit #6). The
+  // endpoints themselves are public and unauthenticated, so without this
+  // sweep a flood of /challenge calls exhausts memory.
+  let sweepTimer: NodeJS.Timeout | null = null;
+  const sweep = (): void => {
+    const now = Date.now();
+    for (const [id, entry] of state.challenges) {
+      if (new Date(entry.challenge.expiresAt).getTime() < now) {
+        state.challenges.delete(id);
+      }
+    }
+    for (const [id, entry] of state.verifications) {
+      if (entry.expiresAt < now) {
+        state.verifications.delete(id);
+      }
+    }
+  };
+  if ((config.expirySweepIntervalMs ?? 0) > 0) {
+    sweepTimer = setInterval(sweep, config.expirySweepIntervalMs!);
+    sweepTimer.unref?.();
+  }
+  const stop = (): void => {
+    if (sweepTimer) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
+  };
+
+  return { app, config, stop };
 }
