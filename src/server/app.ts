@@ -301,6 +301,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     );
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
@@ -834,18 +835,17 @@ export function createApp(customConfig?: Partial<AppConfig>): {
 
     // Why: a real verilm v4 audit binary is several KB minimum (headers,
     // commitments, KV roots). Reject trivially small payloads before the
-    // expensive GPU sidecar call (CAPTCHA-GPU-COST-AMP-001).
-    if (!config.disableAuditBinaryTracking) {
-      const estimatedBytes = Math.floor((auditBinaryB64.length * 3) / 4);
-      if (estimatedBytes < 1024) {
-        res.status(400).json({ error: "receipt_audit_binary_too_small" });
-        return;
-      }
+    // expensive GPU sidecar call (CAPTCHA-GPU-COST-AMP-001, CAPTCHA-SIZE-CHECK-COUPLED-001).
+    const estimatedBytes = Math.floor((auditBinaryB64.length * 3) / 4);
+    if (estimatedBytes < 1024) {
+      res.status(400).json({ error: "receipt_audit_binary_too_small" });
+      return;
     }
 
     // Why: check reuse BEFORE the expensive GPU sidecar call to prevent cost
     // amplification. Use a "pending" sentinel to block concurrent requests
     // while allowing rollback on failure (CAPTCHA-AUDIT-001).
+    const PENDING_SENTINEL = -1;
     if (
       !config.disableAuditBinaryTracking &&
       state.usedAuditBinaryHashes.has(abHash)
@@ -864,6 +864,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       res.status(503).json({ error: "audit_hash_capacity_exceeded" });
       return;
     }
+    // Why: set pending sentinel BEFORE the async sidecar call so concurrent
+    // requests with the same audit binary are rejected (CAPTCHA-AUDIT-BINARY-REUSE-RACE-001).
+    if (!config.disableAuditBinaryTracking) {
+      state.usedAuditBinaryHashes.set(abHash, PENDING_SENTINEL);
+    }
     const verification = await verifyAgentProof({
       challenge: stored.challenge,
       proof: payload.proof as AgentProof,
@@ -872,6 +877,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
 
     if (!verification.valid) {
+      // Why: roll back the pending sentinel so a legitimate retry with a
+      // different challenge can still use this audit binary (CAPTCHA-AUDIT-BINARY-REUSE-RACE-001).
+      if (!config.disableAuditBinaryTracking) {
+        state.usedAuditBinaryHashes.delete(abHash);
+      }
       res
         .status(401)
         .json({ error: verification.reason ?? "verification_failed" });
@@ -894,9 +904,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       // Why: client-asserted model labels are cosmetic; the verifierKeySha256
       // is the authoritative binding. This registry maps key→canonical name.
     };
-    const canonicalModel =
-      VERIFIER_KEY_MODEL_REGISTRY[receipt.artifacts.verifierKeySha256] ??
-      receipt.model;
+    const registryModel =
+      VERIFIER_KEY_MODEL_REGISTRY[receipt.artifacts.verifierKeySha256];
+    const canonicalModel = registryModel ?? receipt.model;
 
     const verifyId = randomUUID();
     const provenance: MessageProvenance = {
@@ -917,7 +927,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         checksPassed: 0,
         failures: ["no_report_from_verifier"],
       },
-      modelSelfAsserted: true,
+      modelSelfAsserted: !registryModel,
       modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120),
     };
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);
