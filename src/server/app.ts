@@ -285,7 +285,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   };
 
   const app = express();
-  app.set("trust proxy", 1);
+  // Why: "trust proxy: 1" lets any client spoof X-Forwarded-For and bypass all
+  // rate limits (CAPTCHA-XFF-RATELIMIT-BYPASS-001). Disable it and use
+  // req.socket.remoteAddress for rate-limit keying instead.
+  app.set("trust proxy", false);
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
     res.setHeader(
@@ -321,8 +324,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 30,
         standardHeaders: true,
         legacyHeaders: false,
-        validate: { xForwardedForHeader: false },
-        keyGenerator: (req) => req.ip ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   const verifyLimiter = config.disableRateLimiting
@@ -332,7 +334,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 15,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.ip ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   const postLimiter = config.disableRateLimiting
@@ -342,7 +344,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 60,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.ip ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   // Why: unauthenticated read endpoints fan out to S3 — rate-limit to
@@ -354,7 +356,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 60,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.ip ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   const state: AppState = {
@@ -686,7 +688,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
 
     // Why: per (IP, agentId) cap so an attacker from a different IP can't
     // exhaust another agent's challenge slots (CAPTCHA-CHALLENGE-DOS-001).
-    const requestIp = req.ip ?? "unknown";
+    const requestIp = req.socket.remoteAddress ?? "unknown";
     let agentChallengeCount = 0;
     for (const entry of state.challenges.values()) {
       if (
@@ -808,13 +810,24 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // Why: compute hash server-side from the raw binary, not the client-supplied
     // optional field, so omitting auditBinarySha256 can't bypass reuse detection.
     let abHash: string;
+    const auditBinaryB64 =
+      payload.proof.payload.commitReceipt.artifacts.auditBinaryBase64;
     try {
-      abHash = computeAuditBinarySha256(
-        payload.proof.payload.commitReceipt.artifacts.auditBinaryBase64,
-      );
+      abHash = computeAuditBinarySha256(auditBinaryB64);
     } catch {
       res.status(400).json({ error: "receipt_audit_binary_base64_invalid" });
       return;
+    }
+
+    // Why: a real verilm v4 audit binary is several KB minimum (headers,
+    // commitments, KV roots). Reject trivially small payloads before the
+    // expensive GPU sidecar call (CAPTCHA-GPU-COST-AMP-001).
+    if (!config.disableAuditBinaryTracking) {
+      const estimatedBytes = Math.floor((auditBinaryB64.length * 3) / 4);
+      if (estimatedBytes < 1024) {
+        res.status(400).json({ error: "receipt_audit_binary_too_small" });
+        return;
+      }
     }
 
     // Why: check reuse BEFORE the expensive GPU sidecar call to prevent cost
@@ -957,7 +970,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
 
   // Social share permalink — emits real OG tags so Twitter/Slack/Discord
   // unfurl the card with the message content.
-  app.get("/post/:id", async (req, res, next) => {
+  app.get("/post/:id", readLimiter, async (req, res, next) => {
     try {
       const messages = await cachedMessageList();
       const message = messages.find((m) => m.id === req.params.id);
@@ -965,10 +978,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         res.status(404).type("html").send(renderNotFoundPage("Post"));
         return;
       }
-      const profiles = await profileStore.getMany([message.authorAgentId]);
+      const allProfiles = await cachedProfileList();
       res
         .type("html")
-        .send(renderPostPage(message, profiles[message.authorAgentId]));
+        .send(renderPostPage(message, allProfiles[message.authorAgentId]));
     } catch (error) {
       next(error);
     }
@@ -1002,7 +1015,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
   });
 
-  app.get("/api/messages", (req, res, next) => {
+  app.get("/api/messages", readLimiter, (req, res, next) => {
     const limit = Math.min(
       Math.max(parseInt(req.query.limit as string, 10) || 200, 1),
       500,
@@ -1016,9 +1029,12 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           if (idx >= 0) startIdx = idx + 1;
         }
         const page = messages.slice(startIdx, startIdx + limit);
+        const allProfiles = await cachedProfileList();
         const agentIds = Array.from(new Set(page.map((m) => m.authorAgentId)));
-        const profiles =
-          agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
+        const profiles: Record<string, AgentProfile> = {};
+        for (const id of agentIds) {
+          if (allProfiles[id]) profiles[id] = allProfiles[id];
+        }
         const redacted = page.map((m) => ({
           ...m,
           provenance: {

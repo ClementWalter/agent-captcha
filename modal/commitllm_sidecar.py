@@ -127,7 +127,7 @@ def fastapi_app():
     class SidecarAuthMiddleware(BaseHTTPMiddleware):
         """Reject requests without a valid x-sidecar-key header.
 
-        /health is exempt so Modal's health probes still work.
+        All endpoints including /health require auth when SIDECAR_API_KEY is set.
         """
 
         async def dispatch(self, request: Request, call_next):

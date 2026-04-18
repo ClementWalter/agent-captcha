@@ -67,10 +67,12 @@ async function main(): Promise<void> {
   if (sidecarUrl && process.env.MODAL_KEEPWARM_DISABLE !== "1") {
     const tick = async () => {
       try {
+        const sidecarApiKey = process.env.SIDECAR_API_KEY ?? "";
         const response = await fetch(
           `${sidecarUrl.replace(/\/+$/, "")}/health`,
           {
             signal: AbortSignal.timeout(10_000),
+            headers: sidecarApiKey ? { "x-sidecar-key": sidecarApiKey } : {},
           },
         );
         if (!response.ok) {
