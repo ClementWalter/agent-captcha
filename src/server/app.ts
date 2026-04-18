@@ -48,6 +48,8 @@ export interface MessageProvenance {
   verifierKeySha256: string;
   verifierKeyId?: string;
   report: CommitLLMVerifyReport;
+  /** True when the model label is client-asserted and not cross-checked against verifierKeySha256. */
+  modelSelfAsserted?: boolean;
   /** First 120 chars of the modelOutput the agent signed over. */
   modelOutputHint?: string;
 }
@@ -162,7 +164,7 @@ const verifyRequestSchema = z.object({
       modelOutputHash: z.string().regex(hex64Regex),
       commitReceipt: z.object({
         challengeId: z.string().uuid(),
-        model: z.string().min(1),
+        model: z.string().min(1).max(200),
         modelVersion: z.string().min(1).max(200).optional(),
         provider: z.string().min(1).max(200),
         auditMode: z.enum(["routine", "deep"]),
@@ -230,6 +232,9 @@ function verifyToken(token: string, secret: string): AgentTokenPayload | null {
     const parsed = JSON.parse(
       Buffer.from(encodedPayload, "base64url").toString("utf8"),
     ) as AgentTokenPayload;
+    if (typeof parsed.exp !== "number" || !Number.isFinite(parsed.exp)) {
+      return null;
+    }
     if (parsed.exp * 1000 < Date.now()) {
       return null;
     }
@@ -285,10 +290,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   };
 
   const app = express();
-  // Why: "trust proxy: 1" lets any client spoof X-Forwarded-For and bypass all
-  // rate limits (CAPTCHA-XFF-RATELIMIT-BYPASS-001). Disable it and use
-  // req.socket.remoteAddress for rate-limit keying instead.
-  app.set("trust proxy", false);
+  // Why: single-hop trust so req.ip uses the rightmost XFF entry appended by
+  // Scaleway envoy, which clients cannot spoof (CAPTCHA-PROXY-RATELIMIT-001).
+  app.set("trust proxy", 1);
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
     res.setHeader(
@@ -299,7 +303,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
     );
     next();
   });
@@ -324,7 +328,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 30,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   const verifyLimiter = config.disableRateLimiting
@@ -334,7 +338,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 15,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   const postLimiter = config.disableRateLimiting
@@ -344,7 +348,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 60,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   // Why: unauthenticated read endpoints fan out to S3 — rate-limit to
@@ -356,7 +360,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 60,
         standardHeaders: true,
         legacyHeaders: false,
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   const state: AppState = {
@@ -691,7 +695,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
 
     // Why: per (IP, agentId) cap so an attacker from a different IP can't
     // exhaust another agent's challenge slots (CAPTCHA-CHALLENGE-DOS-001).
-    const requestIp = req.socket.remoteAddress ?? "unknown";
+    const requestIp = req.ip ?? "unknown";
     let agentChallengeCount = 0;
     for (const entry of state.challenges.values()) {
       if (
@@ -897,6 +901,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         checksPassed: 0,
         failures: [],
       },
+      modelSelfAsserted: true,
       modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120),
     };
     const expSeconds = Math.floor((Date.now() + config.tokenTtlMs) / 1000);

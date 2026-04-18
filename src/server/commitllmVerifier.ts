@@ -96,9 +96,10 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     if (receipt.outputHash !== expected.outputHash) {
       return { valid: false, reason: "receipt_output_hash_mismatch" };
     }
-    // Why: commitHash is tautological (passed from receipt to expected, then
-    // compared to itself). Kept as a structural consistency check, not a
-    // security gate — real integrity comes from bindingHash and auditBinarySha256.
+    // Why: commitHash is client-asserted metadata — expected.commitHash comes
+    // from the same receipt, so this is NOT a security gate. Real integrity is
+    // enforced by bindingHash and auditBinarySha256. Kept only as a structural
+    // consistency check; do not rely on it for trust decisions.
     if (receipt.commitHash !== expected.commitHash) {
       return { valid: false, reason: "receipt_commit_hash_mismatch" };
     }
