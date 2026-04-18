@@ -152,7 +152,7 @@ const verifyRequestSchema = z.object({
       agentId: z.string(),
       agentPublicKey: z.string().regex(hex64Regex),
       answer: z.string().regex(hex64Regex),
-      modelOutput: z.string().min(1).max(200_000),
+      modelOutput: z.string().min(1).max(280),
       modelOutputHash: z.string().regex(hex64Regex),
       commitReceipt: z.object({
         challengeId: z.string().uuid(),
@@ -306,6 +306,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // Scaleway auto-scaling each instance counts independently. This is a
   // best-effort per-instance brake, not a global guarantee. Pair with a
   // reverse-proxy / shared-store rate limit for production-grade defence.
+  // Why: use socket address, not X-Forwarded-For, so spoofed headers can't
+  // bypass rate limits (CAPTCHA-RATE-001).
   const challengeLimiter = config.disableRateLimiting
     ? noopMiddleware
     : rateLimit({
@@ -314,8 +316,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         standardHeaders: true,
         legacyHeaders: false,
         validate: { xForwardedForHeader: false },
-        keyGenerator: (req) =>
-          req.ip ?? req.header("x-forwarded-for") ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   const verifyLimiter = config.disableRateLimiting
@@ -326,8 +327,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         standardHeaders: true,
         legacyHeaders: false,
         validate: { xForwardedForHeader: false },
-        keyGenerator: (req) =>
-          req.ip ?? req.header("x-forwarded-for") ?? "unknown",
+        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
       });
 
   const state: AppState = {
@@ -632,6 +632,18 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return res.status(503).json({ error: "challenge_capacity_exceeded" });
     }
 
+    // Why: per-agentId cap prevents a single agent from monopolizing challenge
+    // capacity even if global rate limits are bypassed (CAPTCHA-DOS-001).
+    let agentChallengeCount = 0;
+    for (const entry of state.challenges.values()) {
+      if (entry.expectedAgentId === agentId && !entry.consumed) {
+        agentChallengeCount++;
+      }
+    }
+    if (agentChallengeCount >= 5) {
+      return res.status(429).json({ error: "too_many_pending_challenges" });
+    }
+
     state.challenges.set(challenge.challengeId, {
       challenge,
       expectedAgentId: agentId,
@@ -712,6 +724,14 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
 
+    // Why: verify accepts modelOutput up to 200k chars but POST /api/messages
+    // caps content at 280 chars. Reject early so the agent doesn't waste a
+    // challenge + GPU inference on output that can never be posted (CAPTCHA-SIZE-001).
+    if (payload.proof.payload.modelOutput.length > 280) {
+      res.status(400).json({ error: "model_output_too_long" });
+      return;
+    }
+
     // Burn the challenge BEFORE the remote verify await — otherwise N
     // concurrent requests carrying the same proof all pass the `consumed`
     // check while the sidecar call (~100-3000ms) is in flight, each minting a
@@ -731,7 +751,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
 
     // Why: check reuse BEFORE the expensive GPU sidecar call to prevent cost
-    // amplification. Mark as used before the async call to prevent TOCTOU races.
+    // amplification. Use a "pending" sentinel to block concurrent requests
+    // while allowing rollback on failure (CAPTCHA-AUDIT-001).
     if (
       !config.disableRateLimiting &&
       state.usedAuditBinaryHashes.has(abHash)
@@ -739,6 +760,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       res.status(409).json({ error: "audit_binary_already_used" });
       return;
     }
+    // Mark pending to block concurrent TOCTOU; rolled back on failure below.
     if (!config.disableRateLimiting) {
       state.usedAuditBinaryHashes.set(abHash, Date.now() + 24 * 60 * 60 * 1000);
     }
@@ -751,6 +773,14 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
 
     if (!verification.valid) {
+      // Rollback: don't permanently burn the audit binary on transient or
+      // invalid-proof failures (CAPTCHA-AUDIT-001).
+      if (!config.disableRateLimiting) {
+        state.usedAuditBinaryHashes.delete(abHash);
+      }
+      // Rollback: don't burn the challenge on verification failure either,
+      // so transient sidecar errors don't waste challenges (CAPTCHA-BURN-001).
+      stored.consumed = false;
       res
         .status(401)
         .json({ error: verification.reason ?? "verification_failed" });
@@ -1080,11 +1110,18 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   });
 
   app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
+    const errType = (error as Error & { type?: string }).type;
     if (
-      (error as Error & { type?: string }).type === "entity.parse.failed" ||
+      errType === "entity.parse.failed" ||
       (error instanceof SyntaxError && "body" in error)
     ) {
       res.status(400).json({ error: "invalid_json" });
+      return;
+    }
+    // Why: express body-parser throws entity.too.large but the default handler
+    // maps it to 500 (CAPTCHA-ERR-001).
+    if (errType === "entity.too.large") {
+      res.status(413).json({ error: "payload_too_large" });
       return;
     }
     logger.error({ err: error }, "Unhandled error");
