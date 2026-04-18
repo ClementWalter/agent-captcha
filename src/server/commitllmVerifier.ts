@@ -31,6 +31,7 @@ export interface CommitLLMModalVerifyResponse {
   verifier_key_sha256?: string;
   verifier_key_id?: string;
   report?: CommitLLMModalVerifyReport;
+  output_hash_verified?: boolean;
   error?: string;
   detail?: string;
 }
@@ -215,6 +216,10 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
 
     // Why: cross-checks are mandatory — if the sidecar omits them, a code
     // change could silently disable security checks (CAPTCHA-CONDITIONAL-CROSSCHECK-001).
+    if (!bridgeResult.output_hash_verified) {
+      return { valid: false, reason: "commitllm_output_hash_not_verified" };
+    }
+
     if (!bridgeResult.audit_binary_sha256) {
       return { valid: false, reason: "commitllm_audit_binary_sha256_missing" };
     }
@@ -233,7 +238,9 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       checksRun: report.checks_run ?? 0,
       checksPassed: report.checks_passed ?? 0,
       failures: Array.isArray(report.failures)
-        ? report.failures.slice(0, 32)
+        ? report.failures
+            .slice(0, 32)
+            .map((s) => (typeof s === "string" ? s.slice(0, 500) : ""))
         : [],
       ...(bridgeResult.verifier_key_id
         ? { verifierKeyId: bridgeResult.verifier_key_id }

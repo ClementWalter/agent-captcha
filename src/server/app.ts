@@ -458,7 +458,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   );
   const globalJsonParser = express.json({ limit: "256kb" });
   app.use((req, res, next) => {
-    if (req.path === VERIFY_V2_PATH || req.path === VERIFY_ALIAS_PATH) {
+    const normalizedPath = req.path.replace(/\/+$/, "");
+    if (
+      normalizedPath === VERIFY_V2_PATH ||
+      normalizedPath === VERIFY_ALIAS_PATH
+    ) {
       return next();
     }
     globalJsonParser(req, res, next);
@@ -877,25 +881,26 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // Why: record hash only after successful verification so garbage
     // submissions don't fill the map (CAPTCHA-AUDIT-HASH-DOS-001).
     if (!config.disableAuditBinaryTracking) {
-      state.usedAuditBinaryHashes.set(abHash, Infinity);
+      const AUDIT_HASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+      state.usedAuditBinaryHashes.set(abHash, Date.now() + AUDIT_HASH_TTL_MS);
     }
 
     // Record the provenance for this verify call. The post endpoint looks it
     // up by verifyId (carried in the access token) so clients can't claim any
     // provenance we didn't check.
     const receipt = payload.proof.payload.commitReceipt;
-    // Model name is self-asserted; verifierKeySha256 implicitly pins weights
-    // but the label is not cross-verified against the sidecar's actual model.
-    logger.info(
-      {
-        model: receipt.model,
-        verifierKeySha256: receipt.artifacts.verifierKeySha256,
-      },
-      "model label is self-asserted metadata — verifierKeySha256 is the authoritative binding",
-    );
+
+    const VERIFIER_KEY_MODEL_REGISTRY: Record<string, string> = {
+      // Why: client-asserted model labels are cosmetic; the verifierKeySha256
+      // is the authoritative binding. This registry maps key→canonical name.
+    };
+    const canonicalModel =
+      VERIFIER_KEY_MODEL_REGISTRY[receipt.artifacts.verifierKeySha256] ??
+      receipt.model;
+
     const verifyId = randomUUID();
     const provenance: MessageProvenance = {
-      model: receipt.model,
+      model: canonicalModel,
       provider: receipt.provider,
       auditMode: receipt.auditMode,
       commitHash: receipt.commitHash,
@@ -1308,9 +1313,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     const messages = await messageStore.list();
     for (const msg of messages) {
       if (msg.provenance.auditBinarySha256) {
+        const AUDIT_HASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
         state.usedAuditBinaryHashes.set(
           msg.provenance.auditBinarySha256,
-          Infinity,
+          Date.now() + AUDIT_HASH_TTL_MS,
         );
       }
     }

@@ -111,6 +111,7 @@ describe("commitllm modal verifier", () => {
         audit_binary_sha256: receipt.artifacts.auditBinarySha256,
         verifier_key_sha256: receipt.artifacts.verifierKeySha256,
         report: { passed: true, checks_run: 7, checks_passed: 7 },
+        output_hash_verified: true,
       }),
     );
 
@@ -227,6 +228,7 @@ describe("commitllm modal verifier", () => {
         ok: true,
         audit_binary_sha256: "a".repeat(64),
         report: { passed: true, checks_run: 7, checks_passed: 7 },
+        output_hash_verified: true,
       }),
     );
 

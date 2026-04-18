@@ -123,17 +123,18 @@ def fastapi_app():
     # attacker used /key to fetch verifierKeySha256 and /verify to iterate on
     # crafted binaries offline. Shared-secret auth cuts off this probing.
     sidecar_api_key = os.environ.get("SIDECAR_API_KEY", "")
+    if not sidecar_api_key:
+        raise RuntimeError(
+            "SIDECAR_API_KEY must be set — refusing to start without auth"
+        )
 
     class SidecarAuthMiddleware(BaseHTTPMiddleware):
         """Reject requests without a valid x-sidecar-key header.
 
-        All endpoints including /health require auth when SIDECAR_API_KEY is set.
+        All endpoints including /health require auth.
         """
 
         async def dispatch(self, request: Request, call_next):
-            if not sidecar_api_key:
-                # No key configured — skip auth (backward compat during rollout)
-                return await call_next(request)
             provided = request.headers.get("x-sidecar-key", "")
             if not hmac.compare_digest(provided, sidecar_api_key):
                 return JSONResponse(
@@ -296,6 +297,15 @@ def fastapi_app():
         # hash) — see pre-prod audit finding #4. When the caller asks for a
         # binding check and we cannot perform it, that's a reject.
         expected_output_hash = body.get("expected_output_hash")
+        if not expected_output_hash:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "expected_output_hash_required",
+                    "detail": "expected_output_hash is mandatory for binding verification",
+                },
+                status_code=400,
+            )
         if expected_output_hash:
             if not hasattr(verilm_rs, "deserialize_v4_audit"):
                 logger.error(
@@ -351,6 +361,7 @@ def fastapi_app():
             "verifier_key_sha256": verifier_key_sha256,
             "verifier_key_id": verifier_key_id,
             "report": report,
+            "output_hash_verified": True,
         }
 
     return app

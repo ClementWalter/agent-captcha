@@ -83,6 +83,7 @@ function createPassingVerifier(): CommitLLMModalReceiptVerifier {
         audit_binary_sha256: fixture.auditBinarySha256,
         verifier_key_sha256: fixture.verifierKeySha256,
         report: { passed: true, checks_run: 7, checks_passed: 7 },
+        output_hash_verified: true,
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
