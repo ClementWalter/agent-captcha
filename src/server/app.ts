@@ -409,7 +409,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     const messages = await messageStore.list();
     // Why: hide historical messages that wouldn't pass current strict verification.
     const verified = messages.filter(
-      (m) => m.provenance.report.passed !== false,
+      (m) => m.provenance.report.passed === true,
     );
     messageCache = { data: verified, expiresAt: now + MESSAGE_CACHE_TTL_MS };
     return verified;
@@ -778,7 +778,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
 
+    // Why: mark consumed synchronously before any async work to close the
+    // race window where concurrent requests both pass the consumed check
+    // (CAPTCHA-CONCURRENT-VERIFY-001). Rolled back on signature failure.
+    stored.consumed = true;
+
     if (stored.expectedAgentId !== payload.agentId) {
+      stored.consumed = false;
       res.status(400).json({ error: "agent_mismatch" });
       return;
     }
@@ -787,6 +793,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // Anyone who controls the matching private key (proved by signature
     // verification inside verifyAgentProof below) has proved ownership.
     if (payload.agentId !== payload.proof.payload.agentPublicKey) {
+      stored.consumed = false;
       res.status(400).json({ error: "agent_id_not_public_key" });
       return;
     }
@@ -795,24 +802,19 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // caps content at 280 chars. Reject early so the agent doesn't waste a
     // challenge + GPU inference on output that can never be posted (CAPTCHA-SIZE-001).
     if (payload.proof.payload.modelOutput.length > 280) {
+      stored.consumed = false;
       res.status(400).json({ error: "model_output_too_long" });
       return;
     }
 
-    // Why: verify Ed25519 signature before burning the challenge. Without
-    // this, an attacker who doesn't hold the private key can permanently burn
-    // a victim's challenge with a fake verify request (CAPTCHA-CHALLENGE-BURN-001).
     const sigValid = await verifyProofSignature(payload.proof as AgentProof);
     if (!sigValid) {
+      // Why: rollback consumed on signature failure so the legitimate key
+      // holder can still use this challenge (CAPTCHA-CHALLENGE-BURN-001).
+      stored.consumed = false;
       res.status(401).json({ error: "invalid_agent_signature" });
       return;
     }
-
-    // Burn the challenge BEFORE the remote verify await — otherwise N
-    // concurrent requests carrying the same proof all pass the `consumed`
-    // check while the sidecar call (~100-3000ms) is in flight, each minting a
-    // fresh verifyId + accessToken (pre-prod audit finding #3).
-    stored.consumed = true;
 
     // Why: compute hash server-side from the raw binary, not the client-supplied
     // optional field, so omitting auditBinarySha256 can't bypass reuse detection.
@@ -858,12 +860,6 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       res.status(503).json({ error: "audit_hash_capacity_exceeded" });
       return;
     }
-    if (!config.disableAuditBinaryTracking) {
-      // Why: no TTL — audit binaries must never be reused, even after container
-      // restarts. The sweep loop skips Infinity entries (CAPTCHA-REPLAY-24H-001).
-      state.usedAuditBinaryHashes.set(abHash, Infinity);
-    }
-
     const verification = await verifyAgentProof({
       challenge: stored.challenge,
       proof: payload.proof as AgentProof,
@@ -872,14 +868,16 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
 
     if (!verification.valid) {
-      // Keep both the audit binary hash and challenge burned on failure.
-      // Rollback would let attackers retry the same binary/challenge until
-      // a transient sidecar error clears (CAPTCHA-AUDIT-ROLLBACK-001,
-      // CAPTCHA-CHALLENGE-ROLLBACK-001).
       res
         .status(401)
         .json({ error: verification.reason ?? "verification_failed" });
       return;
+    }
+
+    // Why: record hash only after successful verification so garbage
+    // submissions don't fill the map (CAPTCHA-AUDIT-HASH-DOS-001).
+    if (!config.disableAuditBinaryTracking) {
+      state.usedAuditBinaryHashes.set(abHash, Infinity);
     }
 
     // Record the provenance for this verify call. The post endpoint looks it
@@ -1210,6 +1208,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           return res.status(401).json({ error: "unknown_verification" });
         }
 
+        // Why: burn before validation so a failed content match can't be retried
+        // with the same token (CAPTCHA-TOKEN-REUSE-001). Matches profile handler.
+        state.verifications.delete(verifyId);
+
         // Bind the post body to the signed modelOutput. Without this the
         // CommitLLM receipt only proves that *some* inference ran — not that
         // the text displayed in the thread is what the model produced
@@ -1227,10 +1229,6 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           createdAt: new Date().toISOString(),
           provenance: record.provenance,
         };
-
-        // Delete verification before async I/O to prevent TOCTOU races where
-        // concurrent requests reuse the same record for both profile and message.
-        state.verifications.delete(verifyId);
         await messageStore.append(message);
         invalidateMessageCache();
 
