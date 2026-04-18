@@ -20,7 +20,10 @@ async function main(): Promise<void> {
     await Promise.all([messageStore.healthCheck(), profileStore.healthCheck()]);
     logger.info("object storage reachable");
   } catch (error) {
-    logger.fatal({ err: error }, "object storage health check failed — refusing to start");
+    logger.fatal(
+      { err: error },
+      "object storage health check failed — refusing to start",
+    );
     process.exit(1);
   }
 
@@ -30,22 +33,27 @@ async function main(): Promise<void> {
   const accessTokenSecret = process.env.AGENT_CAPTCHA_ACCESS_TOKEN_SECRET;
   if (!accessTokenSecret || accessTokenSecret.length < 32) {
     logger.fatal(
-      "AGENT_CAPTCHA_ACCESS_TOKEN_SECRET is required and must be >= 32 chars"
+      "AGENT_CAPTCHA_ACCESS_TOKEN_SECRET is required and must be >= 32 chars",
     );
     process.exit(1);
   }
 
   const allowedOriginsEnv = process.env.AGENT_CAPTCHA_ALLOWED_ORIGINS?.trim();
   const allowedOrigins = allowedOriginsEnv
-    ? allowedOriginsEnv.split(",").map((o) => o.trim()).filter(Boolean)
+    ? allowedOriginsEnv
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean)
     : undefined;
 
-  const { app } = createApp({
+  const { app, init } = createApp({
     accessTokenSecret,
     ...(allowedOrigins ? { allowedOrigins } : {}),
     messageStore,
-    profileStore
+    profileStore,
   });
+
+  await init();
 
   app.listen(port, () => {
     logger.info({ port }, "agent-captcha demo API listening");
@@ -59,9 +67,12 @@ async function main(): Promise<void> {
   if (sidecarUrl && process.env.MODAL_KEEPWARM_DISABLE !== "1") {
     const tick = async () => {
       try {
-        const response = await fetch(`${sidecarUrl.replace(/\/+$/, "")}/health`, {
-          signal: AbortSignal.timeout(10_000)
-        });
+        const response = await fetch(
+          `${sidecarUrl.replace(/\/+$/, "")}/health`,
+          {
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
         if (!response.ok) {
           logger.warn({ status: response.status }, "modal keep-warm non-200");
         }

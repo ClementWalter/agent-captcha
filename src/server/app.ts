@@ -19,6 +19,7 @@ import {
   type AgentProof,
   type CommitLLMVerifyReport,
   type CommitReceiptVerifier,
+  computeAuditBinarySha256,
   verifyAgentProof,
 } from "../sdk";
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
@@ -114,7 +115,7 @@ interface AppState {
   challenges: Map<string, StoredChallenge>;
   verifications: Map<string, VerificationRecord>;
   // Why: reject reuse of the same audit binary across different challenges.
-  usedAuditBinaryHashes: Set<string>;
+  usedAuditBinaryHashes: Map<string, number>;
   migrationTelemetry: {
     receiptDeprecatedCalls: number;
     verifyAliasCalls: number;
@@ -254,6 +255,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   app: express.Express;
   config: AppConfig;
   stop: () => void;
+  init: () => Promise<void>;
 } {
   // accessTokenSecret MUST be provided explicitly — no fallback. Shipping with
   // a default string meant every forged HMAC passed token verification, so the
@@ -331,7 +333,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   const state: AppState = {
     challenges: new Map<string, StoredChallenge>(),
     verifications: new Map<string, VerificationRecord>(),
-    usedAuditBinaryHashes: new Set<string>(),
+    usedAuditBinaryHashes: new Map<string, number>(),
     migrationTelemetry: {
       receiptDeprecatedCalls: 0,
       verifyAliasCalls: 0,
@@ -367,8 +369,12 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return messageCache.data;
     }
     const messages = await messageStore.list();
-    messageCache = { data: messages, expiresAt: now + MESSAGE_CACHE_TTL_MS };
-    return messages;
+    // Why: hide historical messages that wouldn't pass current strict verification.
+    const verified = messages.filter(
+      (m) => m.provenance.report.passed !== false,
+    );
+    messageCache = { data: verified, expiresAt: now + MESSAGE_CACHE_TTL_MS };
+    return verified;
   }
   function invalidateMessageCache(): void {
     messageCache = null;
@@ -712,6 +718,31 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // fresh verifyId + accessToken (pre-prod audit finding #3).
     stored.consumed = true;
 
+    // Why: compute hash server-side from the raw binary, not the client-supplied
+    // optional field, so omitting auditBinarySha256 can't bypass reuse detection.
+    let abHash: string;
+    try {
+      abHash = computeAuditBinarySha256(
+        payload.proof.payload.commitReceipt.artifacts.auditBinaryBase64,
+      );
+    } catch {
+      res.status(400).json({ error: "receipt_audit_binary_base64_invalid" });
+      return;
+    }
+
+    // Why: check reuse BEFORE the expensive GPU sidecar call to prevent cost
+    // amplification. Mark as used before the async call to prevent TOCTOU races.
+    if (
+      !config.disableRateLimiting &&
+      state.usedAuditBinaryHashes.has(abHash)
+    ) {
+      res.status(409).json({ error: "audit_binary_already_used" });
+      return;
+    }
+    if (!config.disableRateLimiting) {
+      state.usedAuditBinaryHashes.set(abHash, Date.now() + 24 * 60 * 60 * 1000);
+    }
+
     const verification = await verifyAgentProof({
       challenge: stored.challenge,
       proof: payload.proof as AgentProof,
@@ -726,20 +757,6 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
 
-    const abHash =
-      payload.proof.payload.commitReceipt.artifacts.auditBinarySha256 ?? "";
-    if (
-      !config.disableRateLimiting &&
-      abHash &&
-      state.usedAuditBinaryHashes.has(abHash)
-    ) {
-      res.status(409).json({ error: "audit_binary_already_used" });
-      return;
-    }
-    if (abHash) {
-      state.usedAuditBinaryHashes.add(abHash);
-    }
-
     // Record the provenance for this verify call. The post endpoint looks it
     // up by verifyId (carried in the access token) so clients can't claim any
     // provenance we didn't check.
@@ -750,7 +767,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       provider: receipt.provider,
       auditMode: receipt.auditMode,
       commitHash: receipt.commitHash,
-      auditBinarySha256: receipt.artifacts.auditBinarySha256 ?? "",
+      auditBinarySha256: abHash,
       verifierKeySha256: receipt.artifacts.verifierKeySha256,
       ...(receipt.artifacts.verifierKeyId
         ? { verifierKeyId: receipt.artifacts.verifierKeyId }
@@ -1091,6 +1108,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         state.verifications.delete(id);
       }
     }
+    for (const [hash, expiresAt] of state.usedAuditBinaryHashes) {
+      if (expiresAt < now) {
+        state.usedAuditBinaryHashes.delete(hash);
+      }
+    }
   };
   if ((config.expirySweepIntervalMs ?? 0) > 0) {
     sweepTimer = setInterval(sweep, config.expirySweepIntervalMs!);
@@ -1103,5 +1125,24 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
   };
 
-  return { app, config, stop };
+  // Why: repopulate audit binary hashes from persisted messages so the reuse
+  // check survives container restarts (CAPTCHA-002).
+  const init = async (): Promise<void> => {
+    const messages = await messageStore.list();
+    const ttl = 24 * 60 * 60 * 1000;
+    for (const msg of messages) {
+      if (msg.provenance.auditBinarySha256) {
+        state.usedAuditBinaryHashes.set(
+          msg.provenance.auditBinarySha256,
+          Date.now() + ttl,
+        );
+      }
+    }
+    logger.info(
+      { count: state.usedAuditBinaryHashes.size },
+      "pre-populated audit binary hashes from message store",
+    );
+  };
+
+  return { app, config, stop, init };
 }
