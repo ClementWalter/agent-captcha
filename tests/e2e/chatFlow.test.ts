@@ -12,7 +12,7 @@ import {
   computeCommitLLMBindingHash,
   computeOutputHash,
   type AgentChallenge,
-  type CommitLLMReceipt
+  type CommitLLMReceipt,
 } from "../../src/sdk";
 import { CommitLLMModalReceiptVerifier } from "../../src/server/commitllmVerifier";
 import type { MessageStore } from "../../src/server/messageStore";
@@ -33,7 +33,7 @@ function createInMemoryMessageStore(): MessageStore {
     async list() {
       return messages.slice();
     },
-    async healthCheck() {}
+    async healthCheck() {},
   };
 }
 
@@ -55,15 +55,17 @@ function createInMemoryProfileStore(): ProfileStore {
     async listAll() {
       return { ...profiles };
     },
-    async healthCheck() {}
+    async healthCheck() {},
   };
 }
 
 // Self-sovereign: agentId IS the Ed25519 public key.
 const demoSigner = {
   agentId: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2",
-  privateKeyHex: "1f1e1d1c1b1a19181716151413121110f0e0d0c0b0a090807060504030201000",
-  publicKeyHex: "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2"
+  privateKeyHex:
+    "1f1e1d1c1b1a19181716151413121110f0e0d0c0b0a090807060504030201000",
+  publicKeyHex:
+    "b7a238dbf5a793f066a95e25d401f3557c6f8e38aeb11e0529861285bc051fd2",
 };
 
 /**
@@ -79,17 +81,20 @@ function createPassingVerifier(): CommitLLMModalReceiptVerifier {
       JSON.stringify({
         ok: true,
         audit_binary_sha256: fixture.auditBinarySha256,
-        report: { passed: true, checks_run: 7, checks_passed: 7 }
+        report: { passed: true, checks_run: 7, checks_passed: 7 },
       }),
-      { status: 200, headers: { "content-type": "application/json" } }
+      { status: 200, headers: { "content-type": "application/json" } },
     );
   return new CommitLLMModalReceiptVerifier({
     sidecarUrl: "https://example.modal.run",
-    fetchImpl
+    fetchImpl,
   });
 }
 
-function buildReceipt(challenge: AgentChallenge, modelOutputHash: string): CommitLLMReceipt {
+function buildReceipt(
+  challenge: AgentChallenge,
+  modelOutputHash: string,
+): CommitLLMReceipt {
   const fixture = loadCommitLLMFixture();
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
 
@@ -107,8 +112,8 @@ function buildReceipt(challenge: AgentChallenge, modelOutputHash: string): Commi
       auditBinaryBase64: fixture.auditBinaryBase64,
       verifierKeyJson: fixture.verifierKeyJson,
       auditBinarySha256: fixture.auditBinarySha256,
-      verifierKeySha256: fixture.verifierKeySha256
-    }
+      verifierKeySha256: fixture.verifierKeySha256,
+    },
   };
 
   receipt.bindingHash = computeCommitLLMBindingHash({
@@ -117,17 +122,24 @@ function buildReceipt(challenge: AgentChallenge, modelOutputHash: string): Commi
     modelOutputHash,
     receipt,
     auditBinarySha256: fixture.auditBinarySha256,
-    verifierKeySha256: fixture.verifierKeySha256
+    verifierKeySha256: fixture.verifierKeySha256,
   });
 
   return receipt;
 }
 
-async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt?: Partial<CommitLLMReceipt>; modelOutput?: string }) {
-  const challengeResponse = await api.post("/api/agent-captcha/challenge").send({ agentId: demoSigner.agentId });
+async function issueProof(
+  api: ReturnType<typeof request>,
+  overrides?: { receipt?: Partial<CommitLLMReceipt>; modelOutput?: string },
+) {
+  const challengeResponse = await api
+    .post("/api/agent-captcha/challenge")
+    .send({ agentId: demoSigner.agentId });
   const challenge = challengeResponse.body.challenge as AgentChallenge;
   const answer = computeChallengeAnswer(challenge, demoSigner.agentId);
-  const modelOutput = overrides?.modelOutput ?? `challenge=${challenge.challengeId};answer=${answer}`;
+  const modelOutput =
+    overrides?.modelOutput ??
+    `challenge=${challenge.challengeId};answer=${answer}`;
 
   const modelOutputHash = computeOutputHash(modelOutput);
   const receipt = buildReceipt(challenge, modelOutputHash);
@@ -136,8 +148,8 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
     ...(overrides?.receipt ?? {}),
     artifacts: {
       ...receipt.artifacts,
-      ...(overrides?.receipt?.artifacts ?? {})
-    }
+      ...(overrides?.receipt?.artifacts ?? {}),
+    },
   };
 
   const bindingHashOverride = overrides?.receipt?.bindingHash;
@@ -148,8 +160,12 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
       answer,
       modelOutputHash,
       receipt: mergedReceipt,
-      auditBinarySha256: mergedReceipt.artifacts.auditBinarySha256 ?? loadCommitLLMFixture().auditBinarySha256,
-      verifierKeySha256: mergedReceipt.artifacts.verifierKeySha256 ?? loadCommitLLMFixture().verifierKeySha256
+      auditBinarySha256:
+        mergedReceipt.artifacts.auditBinarySha256 ??
+        loadCommitLLMFixture().auditBinarySha256,
+      verifierKeySha256:
+        mergedReceipt.artifacts.verifierKeySha256 ??
+        loadCommitLLMFixture().verifierKeySha256,
     });
 
   const proof = await createAgentProof({
@@ -158,20 +174,27 @@ async function issueProof(api: ReturnType<typeof request>, overrides?: { receipt
     modelOutput,
     model: mergedReceipt.model,
     auditMode: mergedReceipt.auditMode,
-    commitReceipt: mergedReceipt
+    commitReceipt: mergedReceipt,
   });
 
   return { challenge, proof, modelOutput };
 }
 
-async function authenticateAgent(api: ReturnType<typeof request>): Promise<{ accessToken: string; modelOutput: string }> {
+async function authenticateAgent(
+  api: ReturnType<typeof request>,
+): Promise<{ accessToken: string; modelOutput: string }> {
   const { proof, modelOutput } = await issueProof(api);
-  const verificationResponse = await api.post("/api/v2/agent-captcha/verify").send({
-    agentId: demoSigner.agentId,
-    proof
-  });
+  const verificationResponse = await api
+    .post("/api/v2/agent-captcha/verify")
+    .send({
+      agentId: demoSigner.agentId,
+      proof,
+    });
 
-  return { accessToken: verificationResponse.body.accessToken as string, modelOutput };
+  return {
+    accessToken: verificationResponse.body.accessToken as string,
+    modelOutput,
+  };
 }
 
 // Long enough to satisfy createApp's floor; irrelevant for logic under test.
@@ -186,12 +209,15 @@ describe("chat flow", () => {
     messageStore: createInMemoryMessageStore(),
     profileStore: createInMemoryProfileStore(),
     expirySweepIntervalMs: 0,
-    disableRateLimiting: true
+    disableRateLimiting: true,
+    disableAuditBinaryTracking: true,
   });
   const api = request(app);
 
   it("rejects messages without token", async () => {
-    const response = await api.post("/api/messages").send({ content: "no token" });
+    const response = await api
+      .post("/api/messages")
+      .send({ content: "no token" });
     expect(response.status).toBe(401);
   });
 
@@ -224,13 +250,14 @@ describe("chat flow", () => {
   it("rejects mismatched commitllm output bindings", async () => {
     const { proof } = await issueProof(api, {
       receipt: {
-        outputHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      }
+        outputHash:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
     });
 
     const response = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
-      proof
+      proof,
     });
 
     expect(response.body.error).toBe("receipt_output_hash_mismatch");
@@ -239,13 +266,14 @@ describe("chat flow", () => {
   it("rejects explicit binding hash tampering", async () => {
     const { proof } = await issueProof(api, {
       receipt: {
-        bindingHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      }
+        bindingHash:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
     });
 
     const response = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
-      proof
+      proof,
     });
 
     expect(response.body.error).toBe("receipt_binding_hash_mismatch");
@@ -256,12 +284,12 @@ describe("chat flow", () => {
 
     await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
-      proof
+      proof,
     });
 
     const replayResponse = await api.post("/api/v2/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
-      proof
+      proof,
     });
 
     expect(replayResponse.status).toBe(409);
@@ -275,17 +303,20 @@ describe("chat flow", () => {
       messageStore: createInMemoryMessageStore(),
       profileStore: createInMemoryProfileStore(),
       expirySweepIntervalMs: 0,
-    disableRateLimiting: true
+      disableRateLimiting: true,
+      disableAuditBinaryTracking: true,
     });
     const expiringApi = request(expiringApp);
 
     const { proof } = await issueProof(expiringApi);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    const response = await expiringApi.post("/api/v2/agent-captcha/verify").send({
-      agentId: demoSigner.agentId,
-      proof
-    });
+    const response = await expiringApi
+      .post("/api/v2/agent-captcha/verify")
+      .send({
+        agentId: demoSigner.agentId,
+        proof,
+      });
 
     expect(response.body.error).toBe("challenge_expired");
   });
@@ -297,7 +328,9 @@ describe("chat flow", () => {
 
   it("tracks deprecated receipt endpoint telemetry", async () => {
     await api.post("/api/agent-captcha/receipt").send({});
-    const statusResponse = await api.get("/api/agent-captcha/migration-status").set("x-admin-key", TEST_ADMIN_API_KEY);
+    const statusResponse = await api
+      .get("/api/agent-captcha/migration-status")
+      .set("x-admin-key", TEST_ADMIN_API_KEY);
     expect(statusResponse.body.telemetry.receiptDeprecatedCalls > 0).toBe(true);
   });
 
@@ -310,9 +343,11 @@ describe("chat flow", () => {
     const { proof } = await issueProof(api);
     await api.post("/api/agent-captcha/verify").send({
       agentId: demoSigner.agentId,
-      proof
+      proof,
     });
-    const statusResponse = await api.get("/api/agent-captcha/migration-status").set("x-admin-key", TEST_ADMIN_API_KEY);
+    const statusResponse = await api
+      .get("/api/agent-captcha/migration-status")
+      .set("x-admin-key", TEST_ADMIN_API_KEY);
     expect(statusResponse.body.telemetry.verifyAliasCalls > 0).toBe(true);
   });
 });

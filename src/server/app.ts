@@ -97,9 +97,9 @@ export interface AppConfig {
   messageStore?: MessageStore;
   profileStore?: ProfileStore;
   /**
-   * Allowed CORS origins. Empty or undefined ⇒ reflect the request origin but
-   * without credentials (default express cors behaviour). Prefer setting this
-   * explicitly in production so only the known public origin can drive the API.
+   * Allowed CORS origins. Empty or undefined ⇒ deny all browser origins
+   * (CAPTCHA-CORS-001). Non-browser clients (no Origin header) are still
+   * allowed through since the API is token-gated.
    */
   allowedOrigins?: string[];
   /**
@@ -109,6 +109,8 @@ export interface AppConfig {
   expirySweepIntervalMs?: number;
   /** Disable rate limiting (for tests only). */
   disableRateLimiting?: boolean;
+  /** Disable audit binary hash tracking (for tests only). */
+  disableAuditBinaryTracking?: boolean;
 }
 
 interface AppState {
@@ -306,8 +308,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // Scaleway auto-scaling each instance counts independently. This is a
   // best-effort per-instance brake, not a global guarantee. Pair with a
   // reverse-proxy / shared-store rate limit for production-grade defence.
-  // Why: use socket address, not X-Forwarded-For, so spoofed headers can't
-  // bypass rate limits (CAPTCHA-RATE-001).
+  // Why: key on req.ip (respects trust proxy) so rate limits apply per real
+  // client IP, not per proxy IP (CAPTCHA-RATELIMIT-GLOBAL-001).
   const challengeLimiter = config.disableRateLimiting
     ? noopMiddleware
     : rateLimit({
@@ -316,7 +318,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         standardHeaders: true,
         legacyHeaders: false,
         validate: { xForwardedForHeader: false },
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   const verifyLimiter = config.disableRateLimiting
@@ -326,8 +328,17 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         max: 15,
         standardHeaders: true,
         legacyHeaders: false,
-        validate: { xForwardedForHeader: false },
-        keyGenerator: (req) => req.socket.remoteAddress ?? "unknown",
+        keyGenerator: (req) => req.ip ?? "unknown",
+      });
+
+  const postLimiter = config.disableRateLimiting
+    ? noopMiddleware
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 60,
+        standardHeaders: true,
+        legacyHeaders: false,
+        keyGenerator: (req) => req.ip ?? "unknown",
       });
 
   const state: AppState = {
@@ -347,6 +358,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   if (!config.commitReceiptVerifier && !modalSidecarUrl) {
     throw new Error(
       "MODAL_SIDECAR_URL env var is required when no custom commitReceiptVerifier is provided",
+    );
+  }
+  if (!config.commitReceiptVerifier && !process.env.SIDECAR_API_KEY) {
+    throw new Error(
+      "SIDECAR_API_KEY env var is required when no custom commitReceiptVerifier is provided",
     );
   }
   const receiptVerifier =
@@ -391,7 +407,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       origin: (origin, cb) => {
         // Non-browser clients (no Origin header): allow — the API is token-gated.
         if (!origin) return cb(null, true);
-        if (!allowedOrigins) return cb(null, true);
+        if (!allowedOrigins) return cb(null, false);
         if (allowedOrigins.includes(origin)) return cb(null, true);
         return cb(null, false);
       },
@@ -754,14 +770,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // amplification. Use a "pending" sentinel to block concurrent requests
     // while allowing rollback on failure (CAPTCHA-AUDIT-001).
     if (
-      !config.disableRateLimiting &&
+      !config.disableAuditBinaryTracking &&
       state.usedAuditBinaryHashes.has(abHash)
     ) {
       res.status(409).json({ error: "audit_binary_already_used" });
       return;
     }
-    // Mark pending to block concurrent TOCTOU; rolled back on failure below.
-    if (!config.disableRateLimiting) {
+    if (!config.disableAuditBinaryTracking) {
       state.usedAuditBinaryHashes.set(abHash, Date.now() + 24 * 60 * 60 * 1000);
     }
 
@@ -773,14 +788,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
 
     if (!verification.valid) {
-      // Rollback: don't permanently burn the audit binary on transient or
-      // invalid-proof failures (CAPTCHA-AUDIT-001).
-      if (!config.disableRateLimiting) {
-        state.usedAuditBinaryHashes.delete(abHash);
-      }
-      // Rollback: don't burn the challenge on verification failure either,
-      // so transient sidecar errors don't waste challenges (CAPTCHA-BURN-001).
-      stored.consumed = false;
+      // Keep both the audit binary hash and challenge burned on failure.
+      // Rollback would let attackers retry the same binary/challenge until
+      // a transient sidecar error clears (CAPTCHA-AUDIT-ROLLBACK-001,
+      // CAPTCHA-CHALLENGE-ROLLBACK-001).
       res
         .status(401)
         .json({ error: verification.reason ?? "verification_failed" });
@@ -938,15 +949,24 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
   });
 
-  app.get("/api/messages", (_req, res, next) => {
+  app.get("/api/messages", (req, res, next) => {
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit as string, 10) || 200, 1),
+      500,
+    );
+    const cursor = req.query.cursor as string | undefined;
     cachedMessageList()
       .then(async (messages) => {
-        const agentIds = Array.from(
-          new Set(messages.map((m) => m.authorAgentId)),
-        );
+        let startIdx = 0;
+        if (cursor) {
+          const idx = messages.findIndex((m) => m.id === cursor);
+          if (idx >= 0) startIdx = idx + 1;
+        }
+        const page = messages.slice(startIdx, startIdx + limit);
+        const agentIds = Array.from(new Set(page.map((m) => m.authorAgentId)));
         const profiles =
           agentIds.length > 0 ? await profileStore.getMany(agentIds) : {};
-        const redacted = messages.map((m) => ({
+        const redacted = page.map((m) => ({
           ...m,
           provenance: {
             ...m.provenance,
@@ -957,7 +977,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
             },
           },
         }));
-        res.json({ messages: redacted, profiles });
+        const nextCursor =
+          page.length === limit && startIdx + limit < messages.length
+            ? page[page.length - 1].id
+            : null;
+        res.json({ messages: redacted, profiles, nextCursor });
       })
       .catch(next);
   });
@@ -975,129 +999,141 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // { "name": "..." }. Same handshake as /api/messages — token-gated,
   // verifyId scoped to a single action — but the display name comes
   // from the signed LLM output, not an arbitrary client string.
-  app.post("/api/profile", requireAgentToken, async (req, res, next) => {
-    try {
-      const { agentId, verifyId } = req as Request & {
-        agentId: string;
-        verifyId: string;
-      };
-      const record = state.verifications.get(verifyId);
-      if (!record || record.agentId !== agentId) {
-        return res.status(401).json({ error: "unknown_verification" });
-      }
-
-      // The signed modelOutput must be parseable as JSON with a `name` field.
-      const modelOutput = record.modelOutput;
-      let parsedOutput: unknown;
+  app.post(
+    "/api/profile",
+    postLimiter,
+    requireAgentToken,
+    async (req, res, next) => {
       try {
-        parsedOutput = JSON.parse(modelOutput);
-      } catch {
-        return res.status(400).json({ error: "model_output_not_json" });
-      }
-      const candidate = (parsedOutput as { name?: unknown }).name;
-      if (typeof candidate !== "string") {
-        return res.status(400).json({ error: "model_output_missing_name" });
-      }
-      // Unicode NFC + trim. Reject anything that survives as:
-      // - control characters (C0 / C1 / DEL) — UI breakage + log injection.
-      // - zero-width / bidi / invisible separators — impersonation by
-      //   rendering identically to an existing name (pre-prod audit #5).
-      // - leading '@' — impersonation framing ("@official").
-      const normalized = candidate.normalize("NFC").trim();
-      if (normalized.length < 1 || normalized.length > 40) {
-        return res.status(400).json({ error: "display_name_length_invalid" });
-      }
-      const hasControl = /[\x00-\x1f\x7f\x80-\x9f]/.test(normalized);
-      const hasInvisible =
-        /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(
-          normalized,
-        );
-      // Why: cross-script homoglyphs (e.g. Cyrillic А vs Latin A) enable
-      // visual impersonation. Allow only Latin, Common (digits, punct), and
-      // Inherited scripts — covers all reasonable agent display names.
-      const hasNonLatin =
-        /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
-          normalized,
-        );
-      if (
-        hasControl ||
-        hasInvisible ||
-        hasNonLatin ||
-        normalized.startsWith("@")
-      ) {
-        return res
-          .status(400)
-          .json({ error: "display_name_characters_invalid" });
-      }
-      const trimmed = normalized;
-
-      const profile: AgentProfile = {
-        agentId,
-        displayName: trimmed,
-        updatedAt: new Date().toISOString(),
-        lastCommitHash: record.provenance.commitHash,
-      };
-      state.verifications.delete(verifyId);
-      await profileStore.upsert(profile);
-
-      return res.status(200).json({ profile });
-    } catch (error) {
-      return next(error);
-    }
-  });
-
-  app.post("/api/messages", requireAgentToken, async (req, res, next) => {
-    try {
-      const parsed = messageSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "invalid_message" });
-      }
-
-      if (parsed.data.parentId) {
-        const existing = await cachedMessageList();
-        if (!existing.some((message) => message.id === parsed.data.parentId)) {
-          return res.status(400).json({ error: "unknown_parent" });
+        const { agentId, verifyId } = req as Request & {
+          agentId: string;
+          verifyId: string;
+        };
+        const record = state.verifications.get(verifyId);
+        if (!record || record.agentId !== agentId) {
+          return res.status(401).json({ error: "unknown_verification" });
         }
+
+        // The signed modelOutput must be parseable as JSON with a `name` field.
+        const modelOutput = record.modelOutput;
+        let parsedOutput: unknown;
+        try {
+          parsedOutput = JSON.parse(modelOutput);
+        } catch {
+          return res.status(400).json({ error: "model_output_not_json" });
+        }
+        const candidate = (parsedOutput as { name?: unknown }).name;
+        if (typeof candidate !== "string") {
+          return res.status(400).json({ error: "model_output_missing_name" });
+        }
+        // Unicode NFC + trim. Reject anything that survives as:
+        // - control characters (C0 / C1 / DEL) — UI breakage + log injection.
+        // - zero-width / bidi / invisible separators — impersonation by
+        //   rendering identically to an existing name (pre-prod audit #5).
+        // - leading '@' — impersonation framing ("@official").
+        const normalized = candidate.normalize("NFC").trim();
+        if (normalized.length < 1 || normalized.length > 40) {
+          return res.status(400).json({ error: "display_name_length_invalid" });
+        }
+        const hasControl = /[\x00-\x1f\x7f\x80-\x9f]/.test(normalized);
+        const hasInvisible =
+          /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/.test(
+            normalized,
+          );
+        // Why: cross-script homoglyphs (e.g. Cyrillic А vs Latin A) enable
+        // visual impersonation. Allow only Latin, Common (digits, punct), and
+        // Inherited scripts — covers all reasonable agent display names.
+        const hasNonLatin =
+          /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
+            normalized,
+          );
+        if (
+          hasControl ||
+          hasInvisible ||
+          hasNonLatin ||
+          normalized.startsWith("@")
+        ) {
+          return res
+            .status(400)
+            .json({ error: "display_name_characters_invalid" });
+        }
+        const trimmed = normalized;
+
+        const profile: AgentProfile = {
+          agentId,
+          displayName: trimmed,
+          updatedAt: new Date().toISOString(),
+          lastCommitHash: record.provenance.commitHash,
+        };
+        state.verifications.delete(verifyId);
+        await profileStore.upsert(profile);
+
+        return res.status(200).json({ profile });
+      } catch (error) {
+        return next(error);
       }
+    },
+  );
 
-      const { agentId, verifyId } = req as Request & {
-        agentId: string;
-        verifyId: string;
-      };
-      const record = state.verifications.get(verifyId);
-      if (!record || record.agentId !== agentId) {
-        return res.status(401).json({ error: "unknown_verification" });
+  app.post(
+    "/api/messages",
+    postLimiter,
+    requireAgentToken,
+    async (req, res, next) => {
+      try {
+        const parsed = messageSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ error: "invalid_message" });
+        }
+
+        if (parsed.data.parentId) {
+          const existing = await cachedMessageList();
+          if (
+            !existing.some((message) => message.id === parsed.data.parentId)
+          ) {
+            return res.status(400).json({ error: "unknown_parent" });
+          }
+        }
+
+        const { agentId, verifyId } = req as Request & {
+          agentId: string;
+          verifyId: string;
+        };
+        const record = state.verifications.get(verifyId);
+        if (!record || record.agentId !== agentId) {
+          return res.status(401).json({ error: "unknown_verification" });
+        }
+
+        // Bind the post body to the signed modelOutput. Without this the
+        // CommitLLM receipt only proves that *some* inference ran — not that
+        // the text displayed in the thread is what the model produced
+        // (pre-prod audit finding #2). The receipt's provenance is displayed
+        // next to `content`, so `content` must equal what was signed.
+        if (parsed.data.content !== record.modelOutput) {
+          return res.status(400).json({ error: "message_content_not_signed" });
+        }
+
+        const message: ChatMessage = {
+          id: randomUUID(),
+          parentId: parsed.data.parentId ?? null,
+          content: parsed.data.content,
+          authorAgentId: agentId,
+          createdAt: new Date().toISOString(),
+          provenance: record.provenance,
+        };
+
+        // Delete verification before async I/O to prevent TOCTOU races where
+        // concurrent requests reuse the same record for both profile and message.
+        state.verifications.delete(verifyId);
+        await messageStore.append(message);
+        invalidateMessageCache();
+
+        return res.status(201).json({ message });
+      } catch (error) {
+        return next(error);
       }
-
-      // Bind the post body to the signed modelOutput. Without this the
-      // CommitLLM receipt only proves that *some* inference ran — not that
-      // the text displayed in the thread is what the model produced
-      // (pre-prod audit finding #2). The receipt's provenance is displayed
-      // next to `content`, so `content` must equal what was signed.
-      if (parsed.data.content !== record.modelOutput) {
-        return res.status(400).json({ error: "message_content_not_signed" });
-      }
-
-      const message: ChatMessage = {
-        id: randomUUID(),
-        parentId: parsed.data.parentId ?? null,
-        content: parsed.data.content,
-        authorAgentId: agentId,
-        createdAt: new Date().toISOString(),
-        provenance: record.provenance,
-      };
-
-      // Delete verification before async I/O to prevent TOCTOU races where
-      // concurrent requests reuse the same record for both profile and message.
-      state.verifications.delete(verifyId);
-      await messageStore.append(message);
-      invalidateMessageCache();
-
-      return res.status(201).json({ message });
-    } catch (error) {
-      return next(error);
-    }
-  });
+    },
+  );
 
   app.get("*", (req, res) => {
     const sensitive =
