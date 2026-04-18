@@ -30,16 +30,24 @@ function shortHex(value: string, head = 8, tail = 6): string {
 
 function agentLabel(agentId: string, profile?: AgentProfile): string {
   const isHex = /^[0-9a-f]{64}$/.test(agentId);
-  const short = isHex ? `agent:${agentId.slice(0, 6)}…${agentId.slice(-4)}` : agentId;
+  const short = isHex
+    ? `agent:${agentId.slice(0, 6)}…${agentId.slice(-4)}`
+    : agentId;
   if (profile?.displayName) {
     return `${profile.displayName} · ${short}`;
   }
   return short;
 }
 
-export function renderPostPage(message: ChatMessage, profile?: AgentProfile): string {
+export function renderPostPage(
+  message: ChatMessage,
+  profile?: AgentProfile,
+): string {
   const label = agentLabel(message.authorAgentId, profile);
-  const preview = message.content.length > 180 ? `${message.content.slice(0, 177)}…` : message.content;
+  const preview =
+    message.content.length > 180
+      ? `${message.content.slice(0, 177)}…`
+      : message.content;
   const permalink = `${BASE_URL}/post/${message.id}`;
   const title = `${label} · The Agent Thread`;
 
@@ -76,7 +84,7 @@ export function renderPostPage(message: ChatMessage, profile?: AgentProfile): st
       <footer class="message-provenance">
         <span class="provenance-badge ${message.provenance.report.passed ? "ok" : "warn"}">
           ${message.provenance.report.passed ? "Verified by CommitLLM" : "Partially verified"}
-          · ${message.provenance.report.checksPassed}/${message.provenance.report.checksRun} checks
+          · ${escapeHtml(String(Number(message.provenance.report.checksPassed) || 0))}/${escapeHtml(String(Number(message.provenance.report.checksRun) || 0))} checks
         </span>
         <span class="provenance-field">model · ${escapeHtml(message.provenance.model)}</span>
         <span class="provenance-field mono">commit · ${escapeHtml(shortHex(message.provenance.commitHash))}</span>
@@ -119,13 +127,13 @@ export function renderNotFoundPage(what: string): string {
 
 export function renderAgentsPage(
   profiles: Record<string, AgentProfile>,
-  messagesByAgent: Record<string, { count: number; lastAt: string }>
+  messagesByAgent: Record<string, { count: number; lastAt: string }>,
 ): string {
   const entries = Object.keys({ ...profiles, ...messagesByAgent })
     .map((agentId) => ({
       agentId,
       profile: profiles[agentId],
-      stats: messagesByAgent[agentId] ?? { count: 0, lastAt: "" }
+      stats: messagesByAgent[agentId] ?? { count: 0, lastAt: "" },
     }))
     .sort((a, b) => b.stats.count - a.stats.count);
 
@@ -162,7 +170,7 @@ export function renderAgentsPage(
     </header>
 
     <ul class="agent-grid">
-      ${cards || "<li class=\"agent-card\">No verified agents yet. Be the first.</li>"}
+      ${cards || '<li class="agent-card">No verified agents yet. Be the first.</li>'}
     </ul>
   </main>
 </body>

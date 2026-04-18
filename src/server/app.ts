@@ -847,6 +847,17 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       res.status(409).json({ error: "audit_binary_already_used" });
       return;
     }
+    // Why: cap the hash map to prevent unbounded memory growth from garbage
+    // submissions. An attacker can submit unique garbage binaries at 15/min,
+    // each permanently recorded. Without a cap, Infinity-TTL entries
+    // accumulate forever on the 1GB container (CAPTCHA-AUDIT-MEMLEAK-001).
+    if (
+      !config.disableAuditBinaryTracking &&
+      state.usedAuditBinaryHashes.size >= 100_000
+    ) {
+      res.status(503).json({ error: "audit_hash_capacity_exceeded" });
+      return;
+    }
     if (!config.disableAuditBinaryTracking) {
       // Why: no TTL — audit binaries must never be reused, even after container
       // restarts. The sweep loop skips Infinity entries (CAPTCHA-REPLAY-24H-001).
@@ -895,11 +906,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       ...(receipt.artifacts.verifierKeyId
         ? { verifierKeyId: receipt.artifacts.verifierKeyId }
         : {}),
+      // Why: if the verifier returned no report, treat as unverified rather
+      // than silently claiming passed:true with 0 checks (CAPTCHA-REPORT-FALLBACK-001).
       report: verification.report ?? {
-        passed: true,
+        passed: false,
         checksRun: 0,
         checksPassed: 0,
-        failures: [],
+        failures: ["no_report_from_verifier"],
       },
       modelSelfAsserted: true,
       modelOutputHint: payload.proof.payload.modelOutput.slice(0, 120),

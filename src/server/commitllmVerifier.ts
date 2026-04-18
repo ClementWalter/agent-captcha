@@ -198,8 +198,12 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     if (!report || typeof report.passed !== "boolean") {
       return { valid: false, reason: "commitllm_verify_v4_invalid_report" };
     }
-    const checksRun = report.checks_run ?? 0;
-    const checksPassed = report.checks_passed ?? 0;
+    // Why: coerce to number so a compromised sidecar returning string values
+    // (e.g. HTML) can't propagate unescaped into provenance (CAPTCHA-XSS-PROVENANCE-001).
+    const checksRun =
+      typeof report.checks_run === "number" ? report.checks_run : 0;
+    const checksPassed =
+      typeof report.checks_passed === "number" ? report.checks_passed : 0;
 
     if (checksRun === 0) {
       return { valid: false, reason: "commitllm_verify_v4_empty_report" };
