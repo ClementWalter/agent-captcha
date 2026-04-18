@@ -21,6 +21,7 @@ import {
   type CommitReceiptVerifier,
   computeAuditBinarySha256,
   verifyAgentProof,
+  verifyProofSignature,
 } from "../sdk";
 import { CommitLLMModalReceiptVerifier } from "./commitllmVerifier";
 import { type MessageStore, createMessageStoreFromEnv } from "./messageStore";
@@ -64,6 +65,9 @@ interface StoredChallenge {
   challenge: AgentChallenge;
   expectedAgentId: string;
   consumed: boolean;
+  // Why: track requesting IP so the per-agent cap is scoped per requester,
+  // preventing cross-IP DoS on another agent's challenge slots.
+  requestIp: string;
 }
 
 /**
@@ -292,7 +296,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'",
+      "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
     );
     next();
   });
@@ -332,6 +336,18 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       });
 
   const postLimiter = config.disableRateLimiting
+    ? noopMiddleware
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 60,
+        standardHeaders: true,
+        legacyHeaders: false,
+        keyGenerator: (req) => req.ip ?? "unknown",
+      });
+
+  // Why: unauthenticated read endpoints fan out to S3 — rate-limit to
+  // prevent cost amplification (CAPTCHA-PROFILES-DOS-001).
+  const readLimiter = config.disableRateLimiting
     ? noopMiddleware
     : rateLimit({
         windowMs: 60 * 1000,
@@ -394,6 +410,26 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   }
   function invalidateMessageCache(): void {
     messageCache = null;
+  }
+
+  // Why: cache profileStore.listAll() to prevent S3 fan-out on every
+  // unauthenticated /api/profiles, /api/stats, and /agents hit.
+  let profileCache: {
+    data: Record<string, AgentProfile>;
+    expiresAt: number;
+  } | null = null;
+  const PROFILE_CACHE_TTL_MS = 30_000;
+  async function cachedProfileList(): Promise<Record<string, AgentProfile>> {
+    const now = Date.now();
+    if (profileCache && profileCache.expiresAt > now) {
+      return profileCache.data;
+    }
+    const profiles = await profileStore.listAll();
+    profileCache = { data: profiles, expiresAt: now + PROFILE_CACHE_TTL_MS };
+    return profiles;
+  }
+  function invalidateProfileCache(): void {
+    profileCache = null;
   }
 
   // Scope CORS to the public origin(s). An allow-all cors() made the API
@@ -648,11 +684,16 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return res.status(503).json({ error: "challenge_capacity_exceeded" });
     }
 
-    // Why: per-agentId cap prevents a single agent from monopolizing challenge
-    // capacity even if global rate limits are bypassed (CAPTCHA-DOS-001).
+    // Why: per (IP, agentId) cap so an attacker from a different IP can't
+    // exhaust another agent's challenge slots (CAPTCHA-CHALLENGE-DOS-001).
+    const requestIp = req.ip ?? "unknown";
     let agentChallengeCount = 0;
     for (const entry of state.challenges.values()) {
-      if (entry.expectedAgentId === agentId && !entry.consumed) {
+      if (
+        entry.expectedAgentId === agentId &&
+        !entry.consumed &&
+        entry.requestIp === requestIp
+      ) {
         agentChallengeCount++;
       }
     }
@@ -664,6 +705,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       challenge,
       expectedAgentId: agentId,
       consumed: false,
+      requestIp,
     });
 
     return res.json({ challenge });
@@ -748,6 +790,15 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
 
+    // Why: verify Ed25519 signature before burning the challenge. Without
+    // this, an attacker who doesn't hold the private key can permanently burn
+    // a victim's challenge with a fake verify request (CAPTCHA-CHALLENGE-BURN-001).
+    const sigValid = await verifyProofSignature(payload.proof as AgentProof);
+    if (!sigValid) {
+      res.status(401).json({ error: "invalid_agent_signature" });
+      return;
+    }
+
     // Burn the challenge BEFORE the remote verify await — otherwise N
     // concurrent requests carrying the same proof all pass the `consumed`
     // check while the sidecar call (~100-3000ms) is in flight, each minting a
@@ -777,7 +828,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       return;
     }
     if (!config.disableAuditBinaryTracking) {
-      state.usedAuditBinaryHashes.set(abHash, Date.now() + 24 * 60 * 60 * 1000);
+      // Why: no TTL — audit binaries must never be reused, even after container
+      // restarts. The sweep loop skips Infinity entries (CAPTCHA-REPLAY-24H-001).
+      state.usedAuditBinaryHashes.set(abHash, Infinity);
     }
 
     const verification = await verifyAgentProof({
@@ -887,8 +940,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
 
   // Aggregate counts for the hero live counter. Cheap — we already list
   // messages on every thread render, so the cost is ~the same as /api/messages.
-  app.get("/api/stats", (_req, res, next) => {
-    Promise.all([cachedMessageList(), profileStore.listAll()])
+  app.get("/api/stats", readLimiter, (_req, res, next) => {
+    Promise.all([cachedMessageList(), cachedProfileList()])
       .then(([messages, profiles]) => {
         const fromMessages = new Set(messages.map((m) => m.authorAgentId));
         const fromProfiles = new Set(Object.keys(profiles));
@@ -924,10 +977,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // Agent directory page — server-rendered so it's crawlable and
   // shareable. Lists every agent that has ever posted plus any profile-only
   // agents that picked a name but haven't posted yet.
-  app.get("/agents", async (_req, res, next) => {
+  app.get("/agents", readLimiter, async (_req, res, next) => {
     try {
       const [profiles, messages] = await Promise.all([
-        profileStore.listAll(),
+        cachedProfileList(),
         cachedMessageList(),
       ]);
       const messagesByAgent: Record<string, { count: number; lastAt: string }> =
@@ -986,9 +1039,8 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       .catch(next);
   });
 
-  app.get("/api/profiles", (_req, res, next) => {
-    profileStore
-      .listAll()
+  app.get("/api/profiles", readLimiter, (_req, res, next) => {
+    cachedProfileList()
       .then((profiles) => {
         res.json({ profiles });
       })
@@ -1067,6 +1119,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
         };
         state.verifications.delete(verifyId);
         await profileStore.upsert(profile);
+        invalidateProfileCache();
 
         return res.status(200).json({ profile });
       } catch (error) {
@@ -1202,12 +1255,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   // check survives container restarts (CAPTCHA-002).
   const init = async (): Promise<void> => {
     const messages = await messageStore.list();
-    const ttl = 24 * 60 * 60 * 1000;
     for (const msg of messages) {
       if (msg.provenance.auditBinarySha256) {
         state.usedAuditBinaryHashes.set(
           msg.provenance.auditBinarySha256,
-          Date.now() + ttl,
+          Infinity,
         );
       }
     }

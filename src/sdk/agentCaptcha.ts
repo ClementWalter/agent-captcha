@@ -108,15 +108,22 @@ export interface CommitReceiptVerifier {
       verifierKeySha256: string;
       agentId: string;
       answer: string;
-    }
-  ): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }>;
+    },
+  ): Promise<{
+    valid: boolean;
+    reason?: string;
+    report?: CommitLLMVerifyReport;
+  }>;
 }
 
 function sha256Hex(value: string): string {
   return bytesToHex(sha256(utf8ToBytes(value)));
 }
 
-export function computeChallengeAnswer(challenge: AgentChallenge, agentId: string): string {
+export function computeChallengeAnswer(
+  challenge: AgentChallenge,
+  agentId: string,
+): string {
   const material = `agent-captcha:v1|${challenge.challengeId}|${challenge.nonce}|${agentId}`;
   return sha256Hex(material);
 }
@@ -146,7 +153,11 @@ function stableStringify(value: unknown): string {
 
 function decodeBase64Strict(value: string): Uint8Array {
   const normalized = value.trim();
-  if (normalized.length === 0 || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+  if (
+    normalized.length === 0 ||
+    normalized.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)
+  ) {
     throw new Error("receipt_audit_binary_base64_invalid");
   }
 
@@ -219,8 +230,8 @@ export function buildCommitLLMBindingMaterial(input: {
     artifact: {
       auditBinarySha256: input.auditBinarySha256,
       verifierKeySha256: input.verifierKeySha256,
-      verifierKeyId: input.receipt.artifacts.verifierKeyId ?? null
-    }
+      verifierKeyId: input.receipt.artifacts.verifierKeyId ?? null,
+    },
   };
 }
 
@@ -236,9 +247,17 @@ export function computeCommitLLMBindingHash(input: {
   return sha256Hex(stableStringify(material));
 }
 
-function deriveArtifactHashes(receipt: CommitLLMReceipt): { auditBinarySha256: string; verifierKeySha256: string } {
-  const computedAuditBinarySha256 = computeAuditBinarySha256(receipt.artifacts.auditBinaryBase64);
-  if (receipt.artifacts.auditBinarySha256 && receipt.artifacts.auditBinarySha256 !== computedAuditBinarySha256) {
+function deriveArtifactHashes(receipt: CommitLLMReceipt): {
+  auditBinarySha256: string;
+  verifierKeySha256: string;
+} {
+  const computedAuditBinarySha256 = computeAuditBinarySha256(
+    receipt.artifacts.auditBinaryBase64,
+  );
+  if (
+    receipt.artifacts.auditBinarySha256 &&
+    receipt.artifacts.auditBinarySha256 !== computedAuditBinarySha256
+  ) {
     throw new Error("receipt_artifact_audit_sha256_mismatch");
   }
 
@@ -247,7 +266,9 @@ function deriveArtifactHashes(receipt: CommitLLMReceipt): { auditBinarySha256: s
   // hash — the remote verifier will cross-check it against its own cached key.
   let verifierKeySha256: string;
   if (receipt.artifacts.verifierKeyJson) {
-    verifierKeySha256 = computeVerifierKeySha256(receipt.artifacts.verifierKeyJson);
+    verifierKeySha256 = computeVerifierKeySha256(
+      receipt.artifacts.verifierKeyJson,
+    );
     if (receipt.artifacts.verifierKeySha256 !== verifierKeySha256) {
       throw new Error("receipt_artifact_verifier_key_sha256_mismatch");
     }
@@ -260,7 +281,7 @@ function deriveArtifactHashes(receipt: CommitLLMReceipt): { auditBinarySha256: s
 
   return {
     auditBinarySha256: computedAuditBinarySha256,
-    verifierKeySha256
+    verifierKeySha256,
   };
 }
 
@@ -287,15 +308,34 @@ export async function createAgentProof(input: {
     modelOutput: input.modelOutput,
     modelOutputHash,
     commitReceipt: input.commitReceipt,
-    createdAt: (input.now ?? new Date()).toISOString()
+    createdAt: (input.now ?? new Date()).toISOString(),
   };
 
-  const signature = await signAsync(serializePayload(payload), hexToBytes(input.signer.privateKeyHex));
+  const signature = await signAsync(
+    serializePayload(payload),
+    hexToBytes(input.signer.privateKeyHex),
+  );
 
   return {
     payload,
-    signature: bytesToHex(signature)
+    signature: bytesToHex(signature),
   };
+}
+
+// Why: lets callers gate expensive work (challenge burn, sidecar call)
+// behind a cheap ownership check (CAPTCHA-CHALLENGE-BURN-001).
+export async function verifyProofSignature(
+  proof: AgentProof,
+): Promise<boolean> {
+  try {
+    return await verifyAsync(
+      hexToBytes(proof.signature),
+      serializePayload(proof.payload),
+      hexToBytes(proof.payload.agentPublicKey),
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function verifyAgentProof(input: {
@@ -304,7 +344,11 @@ export async function verifyAgentProof(input: {
   expectedAgentId: string;
   verifier: CommitReceiptVerifier;
   now?: Date;
-}): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }> {
+}): Promise<{
+  valid: boolean;
+  reason?: string;
+  report?: CommitLLMVerifyReport;
+}> {
   const now = input.now ?? new Date();
   if (new Date(input.challenge.expiresAt).getTime() < now.getTime()) {
     return { valid: false, reason: "challenge_expired" };
@@ -318,18 +362,25 @@ export async function verifyAgentProof(input: {
     return { valid: false, reason: "agent_id_mismatch" };
   }
 
-  const expectedAnswer = computeChallengeAnswer(input.challenge, input.expectedAgentId);
+  const expectedAnswer = computeChallengeAnswer(
+    input.challenge,
+    input.expectedAgentId,
+  );
   if (input.proof.payload.answer !== expectedAnswer) {
     return { valid: false, reason: "invalid_challenge_answer" };
   }
 
   const payload = input.proof.payload;
-  const modelAllowed = input.challenge.policy.allowedModels.includes(payload.commitReceipt.model);
+  const modelAllowed = input.challenge.policy.allowedModels.includes(
+    payload.commitReceipt.model,
+  );
   if (!modelAllowed) {
     return { valid: false, reason: "model_not_allowed" };
   }
 
-  const auditAllowed = input.challenge.policy.allowedAuditModes.includes(payload.commitReceipt.auditMode);
+  const auditAllowed = input.challenge.policy.allowedAuditModes.includes(
+    payload.commitReceipt.auditMode,
+  );
   if (!auditAllowed) {
     return { valid: false, reason: "audit_mode_not_allowed" };
   }
@@ -353,12 +404,13 @@ export async function verifyAgentProof(input: {
       modelOutputHash: payload.modelOutputHash,
       receipt: payload.commitReceipt,
       auditBinarySha256: artifactHashes.auditBinarySha256,
-      verifierKeySha256: artifactHashes.verifierKeySha256
+      verifierKeySha256: artifactHashes.verifierKeySha256,
     });
   } catch (error) {
     return {
       valid: false,
-      reason: error instanceof Error ? error.message : "receipt_binding_invalid"
+      reason:
+        error instanceof Error ? error.message : "receipt_binding_invalid",
     };
   }
 
@@ -371,32 +423,39 @@ export async function verifyAgentProof(input: {
   const signatureValid = await verifyAsync(
     hexToBytes(input.proof.signature),
     serializePayload(payload),
-    hexToBytes(payload.agentPublicKey)
+    hexToBytes(payload.agentPublicKey),
   );
 
   if (!signatureValid) {
     return { valid: false, reason: "invalid_agent_signature" };
   }
 
-  const receiptResult = await input.verifier.verifyReceipt(payload.commitReceipt, {
-    challengeId: payload.challengeId,
-    outputHash: payload.modelOutputHash,
-    commitHash: payload.commitReceipt.commitHash,
-    bindingHash,
-    bindingVersion: COMMITLLM_BINDING_VERSION,
-    auditBinarySha256: artifactHashes.auditBinarySha256,
-    verifierKeySha256: artifactHashes.verifierKeySha256,
-    agentId: payload.agentId,
-    answer: payload.answer
-  });
+  const receiptResult = await input.verifier.verifyReceipt(
+    payload.commitReceipt,
+    {
+      challengeId: payload.challengeId,
+      outputHash: payload.modelOutputHash,
+      commitHash: payload.commitReceipt.commitHash,
+      bindingHash,
+      bindingVersion: COMMITLLM_BINDING_VERSION,
+      auditBinarySha256: artifactHashes.auditBinarySha256,
+      verifierKeySha256: artifactHashes.verifierKeySha256,
+      agentId: payload.agentId,
+      answer: payload.answer,
+    },
+  );
   if (!receiptResult.valid) {
     return receiptResult;
   }
 
-  const challengeAge = now.getTime() - new Date(input.challenge.issuedAt).getTime();
+  const challengeAge =
+    now.getTime() - new Date(input.challenge.issuedAt).getTime();
   if (challengeAge > input.challenge.policy.maxChallengeAgeMs) {
     return { valid: false, reason: "challenge_too_old" };
   }
 
-  return { valid: true, ...(receiptResult.report ? { report: receiptResult.report } : {}) };
+  return {
+    valid: true,
+    ...(receiptResult.report ? { report: receiptResult.report } : {}),
+  };
 }

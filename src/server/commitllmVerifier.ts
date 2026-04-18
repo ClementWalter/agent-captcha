@@ -12,7 +12,7 @@ import {
   computeAuditBinarySha256,
   type CommitLLMReceipt,
   type CommitLLMVerifyReport,
-  type CommitReceiptVerifier
+  type CommitReceiptVerifier,
 } from "../sdk";
 
 const logger = pino({ name: "agent-captcha-commitllm-verifier" });
@@ -65,7 +65,8 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     this.sidecarUrl = config.sidecarUrl.replace(/\/+$/, "");
     this.timeoutMs = config.timeoutMs ?? 60_000;
     this.maxAuditBinaryBytes = config.maxAuditBinaryBytes ?? 10_000_000;
-    this.sidecarApiKey = config.sidecarApiKey ?? process.env.SIDECAR_API_KEY ?? "";
+    this.sidecarApiKey =
+      config.sidecarApiKey ?? process.env.SIDECAR_API_KEY ?? "";
     this.fetchImpl = config.fetchImpl ?? fetch;
   }
 
@@ -81,8 +82,12 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       verifierKeySha256: string;
       agentId: string;
       answer: string;
-    }
-  ): Promise<{ valid: boolean; reason?: string; report?: CommitLLMVerifyReport }> {
+    },
+  ): Promise<{
+    valid: boolean;
+    reason?: string;
+    report?: CommitLLMVerifyReport;
+  }> {
     // Shape checks: keep these local so we never round-trip to Modal for
     // obviously-wrong receipts.
     if (receipt.challengeId !== expected.challengeId) {
@@ -91,6 +96,9 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     if (receipt.outputHash !== expected.outputHash) {
       return { valid: false, reason: "receipt_output_hash_mismatch" };
     }
+    // Why: commitHash is tautological (passed from receipt to expected, then
+    // compared to itself). Kept as a structural consistency check, not a
+    // security gate — real integrity comes from bindingHash and auditBinarySha256.
     if (receipt.commitHash !== expected.commitHash) {
       return { valid: false, reason: "receipt_commit_hash_mismatch" };
     }
@@ -106,11 +114,16 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     // (the sidecar holds the authoritative copy).
     let computedAuditBinarySha256: string;
     try {
-      computedAuditBinarySha256 = computeAuditBinarySha256(receipt.artifacts.auditBinaryBase64);
+      computedAuditBinarySha256 = computeAuditBinarySha256(
+        receipt.artifacts.auditBinaryBase64,
+      );
     } catch (error) {
       return {
         valid: false,
-        reason: error instanceof Error ? error.message : "receipt_artifact_digest_error"
+        reason:
+          error instanceof Error
+            ? error.message
+            : "receipt_artifact_digest_error",
       };
     }
     if (computedAuditBinarySha256 !== expected.auditBinarySha256) {
@@ -118,7 +131,9 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     }
 
     // Payload size bound.
-    const estimatedAuditBinaryBytes = Math.floor((receipt.artifacts.auditBinaryBase64.length * 3) / 4);
+    const estimatedAuditBinaryBytes = Math.floor(
+      (receipt.artifacts.auditBinaryBase64.length * 3) / 4,
+    );
     if (estimatedAuditBinaryBytes > this.maxAuditBinaryBytes) {
       return { valid: false, reason: "receipt_audit_binary_too_large" };
     }
@@ -131,7 +146,9 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(this.sidecarApiKey ? { "x-sidecar-key": this.sidecarApiKey } : {}),
+          ...(this.sidecarApiKey
+            ? { "x-sidecar-key": this.sidecarApiKey }
+            : {}),
         },
         body: JSON.stringify({
           audit_binary_base64: receipt.artifacts.auditBinaryBase64,
@@ -140,16 +157,21 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
           // model output. Prevents rebinding a valid binary to arbitrary text.
           expected_output_hash: expected.outputHash,
         }),
-        signal: controller.signal
+        signal: controller.signal,
       });
     } catch (error) {
       logger.warn(
-        { err: error, sidecarUrl: this.sidecarUrl, challengeId: receipt.challengeId },
-        "CommitLLM Modal sidecar request failed"
+        {
+          err: error,
+          sidecarUrl: this.sidecarUrl,
+          challengeId: receipt.challengeId,
+        },
+        "CommitLLM Modal sidecar request failed",
       );
-      const reason = error instanceof Error && error.name === "AbortError"
-        ? "commitllm_modal_timeout"
-        : "commitllm_modal_unreachable";
+      const reason =
+        error instanceof Error && error.name === "AbortError"
+          ? "commitllm_modal_timeout"
+          : "commitllm_modal_unreachable";
       return { valid: false, reason };
     } finally {
       clearTimeout(timeoutHandle);
@@ -164,7 +186,10 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
 
     if (!response.ok || !bridgeResult.ok) {
       const code = bridgeResult.error ?? `http_${response.status}`;
-      logger.warn({ code, detail: bridgeResult.detail }, "CommitLLM Modal rejected receipt");
+      logger.warn(
+        { code, detail: bridgeResult.detail },
+        "CommitLLM Modal rejected receipt",
+      );
       return { valid: false, reason: `commitllm_modal_${code}` };
     }
 
@@ -183,10 +208,18 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       return { valid: false, reason: "commitllm_verify_v4_failed" };
     }
 
-    if (bridgeResult.audit_binary_sha256 && bridgeResult.audit_binary_sha256 !== expected.auditBinarySha256) {
+    // Why: cross-checks are mandatory — if the sidecar omits them, a code
+    // change could silently disable security checks (CAPTCHA-CONDITIONAL-CROSSCHECK-001).
+    if (!bridgeResult.audit_binary_sha256) {
+      return { valid: false, reason: "commitllm_audit_binary_sha256_missing" };
+    }
+    if (bridgeResult.audit_binary_sha256 !== expected.auditBinarySha256) {
       return { valid: false, reason: "commitllm_audit_binary_sha256_mismatch" };
     }
-    if (bridgeResult.verifier_key_sha256 && bridgeResult.verifier_key_sha256 !== expected.verifierKeySha256) {
+    if (!bridgeResult.verifier_key_sha256) {
+      return { valid: false, reason: "commitllm_verifier_key_sha256_missing" };
+    }
+    if (bridgeResult.verifier_key_sha256 !== expected.verifierKeySha256) {
       return { valid: false, reason: "commitllm_verifier_key_sha256_mismatch" };
     }
 
@@ -194,8 +227,12 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
       passed: report.passed,
       checksRun: report.checks_run ?? 0,
       checksPassed: report.checks_passed ?? 0,
-      failures: Array.isArray(report.failures) ? report.failures.slice(0, 32) : [],
-      ...(bridgeResult.verifier_key_id ? { verifierKeyId: bridgeResult.verifier_key_id } : {})
+      failures: Array.isArray(report.failures)
+        ? report.failures.slice(0, 32)
+        : [],
+      ...(bridgeResult.verifier_key_id
+        ? { verifierKeyId: bridgeResult.verifier_key_id }
+        : {}),
     };
     return { valid: true, report: normalizedReport };
   }

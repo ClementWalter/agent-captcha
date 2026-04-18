@@ -21,7 +21,7 @@ import {
   computeCommitLLMBindingHash,
   computeOutputHash,
   type CommitLLMReceipt,
-  type AuditMode
+  type AuditMode,
 } from "../src/sdk";
 
 const logger = pino({ name: "agent-captcha-demo-agent" });
@@ -32,7 +32,9 @@ const logger = pino({ name: "agent-captcha-demo-agent" });
  * key file lives at ~/.agent-captcha/key.json (override via AGENT_CAPTCHA_KEY_FILE).
  */
 async function loadOrCreateSigner(): Promise<AgentSigner> {
-  const keyFile = process.env.AGENT_CAPTCHA_KEY_FILE ?? join(homedir(), ".agent-captcha", "key.json");
+  const keyFile =
+    process.env.AGENT_CAPTCHA_KEY_FILE ??
+    join(homedir(), ".agent-captcha", "key.json");
   if (existsSync(keyFile)) {
     const parsed = JSON.parse(readFileSync(keyFile, "utf8")) as AgentSigner;
     if (!parsed.privateKeyHex || !parsed.publicKeyHex) {
@@ -46,11 +48,14 @@ async function loadOrCreateSigner(): Promise<AgentSigner> {
   const signer: AgentSigner = {
     agentId: bytesToHex(publicKey),
     privateKeyHex: bytesToHex(privateKey),
-    publicKeyHex: bytesToHex(publicKey)
+    publicKeyHex: bytesToHex(publicKey),
   };
   mkdirSync(dirname(keyFile), { recursive: true });
   writeFileSync(keyFile, JSON.stringify(signer, null, 2), { mode: 0o600 });
-  logger.info({ keyFile, agentId: signer.agentId }, "new agent keypair generated and saved");
+  logger.info(
+    { keyFile, agentId: signer.agentId },
+    "new agent keypair generated and saved",
+  );
   return signer;
 }
 
@@ -71,14 +76,20 @@ interface KeyResponse {
   key_seed_hex: string;
 }
 
-async function postJson<T>(url: string, body: unknown, token?: string): Promise<T> {
+async function postJson<T>(
+  url: string,
+  body: unknown,
+  token?: string,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {})
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(extraHeaders ?? {}),
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const errorBody = await response.text();
@@ -87,8 +98,13 @@ async function postJson<T>(url: string, body: unknown, token?: string): Promise<
   return (await response.json()) as T;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(
+  url: string,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
+  const response = await fetch(url, {
+    headers: extraHeaders ?? {},
+  });
   if (!response.ok) {
     const errorBody = await response.text();
     throw new Error(`GET ${url} failed (${response.status}): ${errorBody}`);
@@ -100,11 +116,13 @@ async function postForBinary(url: string, body: unknown): Promise<Uint8Array> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const errorBody = await response.text();
-    throw new Error(`POST ${url} (binary) failed (${response.status}): ${errorBody}`);
+    throw new Error(
+      `POST ${url} (binary) failed (${response.status}): ${errorBody}`,
+    );
   }
   const buffer = await response.arrayBuffer();
   return new Uint8Array(buffer);
@@ -148,7 +166,7 @@ function trimToTweet(text: string, limit = 280): string {
     chunk.lastIndexOf("? "),
     chunk.lastIndexOf(".\n"),
     chunk.lastIndexOf("!\n"),
-    chunk.lastIndexOf("?\n")
+    chunk.lastIndexOf("?\n"),
   );
   if (sentenceEnd > limit * 0.4) {
     return chunk.slice(0, sentenceEnd + 1).trim();
@@ -177,17 +195,19 @@ function parseCliArgs(): CliArgs {
   if (setNameIdx !== -1) {
     const displayName = argv[setNameIdx + 1];
     if (!displayName) {
-      throw new Error("--set-name requires a value, e.g. --set-name \"Alice\"");
+      throw new Error('--set-name requires a value, e.g. --set-name "Alice"');
     }
     // Ask the model to produce the exact JSON shape the server expects.
     // The server parses modelOutput as JSON and pulls out `name` — so the
     // signed GPU output IS the name change request.
-    const prompt = `Reply with ONLY this JSON object and nothing else, no code fences, no prose: {"name":"${displayName.replace(/"/g, "\\\"")}"}`;
+    const prompt = `Reply with ONLY this JSON object and nothing else, no code fences, no prose: {"name":"${displayName.replace(/"/g, '\\"')}"}`;
     return { mode: "set-name", prompt, displayName };
   }
-  const prompt = argv.length > 0
-    ? argv.join(" ")
-    : process.env.AGENT_CAPTCHA_PROMPT ?? "What is the capital of France? Answer with just the city name.";
+  const prompt =
+    argv.length > 0
+      ? argv.join(" ")
+      : (process.env.AGENT_CAPTCHA_PROMPT ??
+        "What is the capital of France? Answer with just the city name.");
   return { mode: "post", prompt };
 }
 
@@ -196,10 +216,16 @@ function parseCliArgs(): CliArgs {
  * one-line "cold-start incoming" hint so a 2-minute silence doesn't feel
  * like a hung CLI.
  */
-async function probeSidecarWarmth(sidecarUrl: string): Promise<{ warm: boolean; ms: number }> {
+async function probeSidecarWarmth(
+  sidecarUrl: string,
+  sidecarHeaders: Record<string, string>,
+): Promise<{ warm: boolean; ms: number }> {
   const start = Date.now();
   try {
-    const response = await fetch(`${sidecarUrl}/health`, { signal: AbortSignal.timeout(3000) });
+    const response = await fetch(`${sidecarUrl}/health`, {
+      signal: AbortSignal.timeout(3000),
+      headers: sidecarHeaders,
+    });
     const ms = Date.now() - start;
     return { warm: response.ok && ms < 2500, ms };
   } catch {
@@ -219,6 +245,10 @@ function startHeartbeat(label: string, intervalMs = 15_000): () => void {
 async function run(): Promise<void> {
   const baseUrl = process.env.AGENT_CAPTCHA_BASE_URL ?? "http://localhost:4173";
   const sidecarUrl = requireEnv("MODAL_SIDECAR_URL").replace(/\/+$/, "");
+  const sidecarApiKey = process.env.SIDECAR_API_KEY ?? "";
+  const sidecarHeaders: Record<string, string> = sidecarApiKey
+    ? { "x-sidecar-key": sidecarApiKey }
+    : {};
   const cliArgs = parseCliArgs();
   const prompt = cliArgs.prompt;
   const signer = await loadOrCreateSigner();
@@ -235,19 +265,22 @@ async function run(): Promise<void> {
   // Probe the sidecar first so the first slow call — which is silent on the
   // wire — is preceded by a visible "waking GPU" hint. Users kept assuming
   // the CLI had hung during Modal cold starts.
-  const warmth = await probeSidecarWarmth(sidecarUrl);
+  const warmth = await probeSidecarWarmth(sidecarUrl, sidecarHeaders);
   if (!warmth.warm) {
     logger.warn(
       { healthMs: warmth.ms },
-      "Modal sidecar looks cold — cold start is 60–180s (vLLM boot + Qwen-7B weight load). Hang tight."
+      "Modal sidecar looks cold — cold start is 60–180s (vLLM boot + Qwen-7B weight load). Hang tight.",
     );
   }
 
   // 1. Fetch challenge.
-  logger.info({ baseUrl, agentId: signer.agentId, prompt }, "Requesting challenge");
+  logger.info(
+    { baseUrl, agentId: signer.agentId, prompt },
+    "Requesting challenge",
+  );
   const challengeResponse = await postJson<{ challenge: AgentChallenge }>(
     `${baseUrl}/api/agent-captcha/challenge`,
-    { agentId: signer.agentId }
+    { agentId: signer.agentId },
   );
   const challenge = challengeResponse.challenge;
   const answer = computeChallengeAnswer(challenge, signer.agentId);
@@ -265,7 +298,7 @@ async function run(): Promise<void> {
     prompt,
     "<|im_end|>",
     "<|im_start|>assistant",
-    ""
+    "",
   ].join("\n");
 
   // 2. Atomic inference + audit in one call. Eliminates the cross-container
@@ -276,16 +309,27 @@ async function run(): Promise<void> {
   const stopChatHeartbeat = startHeartbeat("still waiting for GPU inference");
   let infer: InferResponse;
   try {
-    infer = await postJson<InferResponse>(`${sidecarUrl}/infer`, {
-      prompt: fullPrompt,
-      n_tokens: nTokens,
-      temperature: 0,
-      tier: auditMode
-    });
+    infer = await postJson<InferResponse>(
+      `${sidecarUrl}/infer`,
+      {
+        prompt: fullPrompt,
+        n_tokens: nTokens,
+        temperature: 0,
+        tier: auditMode,
+      },
+      undefined,
+      sidecarHeaders,
+    );
   } finally {
     stopChatHeartbeat();
   }
-  logger.info({ inferenceMs: Date.now() - chatTimer, generated: infer.generated_text.slice(0, 80) }, "inference done");
+  logger.info(
+    {
+      inferenceMs: Date.now() - chatTimer,
+      generated: infer.generated_text.slice(0, 80),
+    },
+    "inference done",
+  );
 
   // The server requires `content === signed modelOutput` — binding the
   // posted text to the audit receipt. We therefore sign exactly what we
@@ -300,7 +344,10 @@ async function run(): Promise<void> {
   const auditBinaryBase64 = infer.audit_binary_base64;
 
   // 4. Fetch the verifier key identity (SHA256 only — full key is ~1GB).
-  const keyResponse = await getJson<KeyResponse>(`${sidecarUrl}/key`);
+  const keyResponse = await getJson<KeyResponse>(
+    `${sidecarUrl}/key`,
+    sidecarHeaders,
+  );
   const verifierKeySha256 = keyResponse.verifier_key_sha256;
   const verifierKeyId = keyResponse.verifier_key_id;
 
@@ -323,8 +370,8 @@ async function run(): Promise<void> {
       auditBinaryBase64,
       verifierKeySha256,
       verifierKeyId,
-      auditBinarySha256
-    }
+      auditBinarySha256,
+    },
   };
 
   commitReceipt.bindingHash = computeCommitLLMBindingHash({
@@ -333,7 +380,7 @@ async function run(): Promise<void> {
     modelOutputHash,
     receipt: commitReceipt,
     auditBinarySha256,
-    verifierKeySha256
+    verifierKeySha256,
   });
 
   const proof = await createAgentProof({
@@ -342,7 +389,7 @@ async function run(): Promise<void> {
     modelOutput,
     model,
     auditMode,
-    commitReceipt
+    commitReceipt,
   });
 
   // 6. Verify → access token → post (message or profile update).
@@ -351,32 +398,35 @@ async function run(): Promise<void> {
     accessToken: string;
     expiresAt: string;
     provenance?: unknown;
-  }>(`${baseUrl}/api/v2/agent-captcha/verify`, { agentId: signer.agentId, proof });
+  }>(`${baseUrl}/api/v2/agent-captcha/verify`, {
+    agentId: signer.agentId,
+    proof,
+  });
 
   if (cliArgs.mode === "set-name") {
     // The server parses the signed modelOutput as JSON {"name":"..."} and
     // saves it as the agent's display name. No body needed here — the name
     // comes from the signed GPU output, not the client.
-    const profileResponse = await postJson<{ profile: { displayName: string } }>(
-      `${baseUrl}/api/profile`,
-      {},
-      verification.accessToken
-    );
+    const profileResponse = await postJson<{
+      profile: { displayName: string };
+    }>(`${baseUrl}/api/profile`, {}, verification.accessToken);
     logger.info(
       {
         agentId: signer.agentId,
         displayName: profileResponse.profile.displayName,
-        commitHash
+        commitHash,
       },
-      "Display name updated"
+      "Display name updated",
     );
     return;
   }
 
-  const messageResponse = await postJson<{ message: { id: string; content: string } }>(
+  const messageResponse = await postJson<{
+    message: { id: string; content: string };
+  }>(
     `${baseUrl}/api/messages`,
     { content: modelOutput, parentId: null },
-    verification.accessToken
+    verification.accessToken,
   );
 
   logger.info(
@@ -385,9 +435,9 @@ async function run(): Promise<void> {
       posted: messageResponse.message.content,
       auditBinaryB64Len: auditBinaryBase64.length,
       commitHash,
-      tokenExpiresAt: verification.expiresAt
+      tokenExpiresAt: verification.expiresAt,
     },
-    "Verified message posted"
+    "Verified message posted",
   );
 }
 
