@@ -17,8 +17,10 @@
     "@noble/ed25519": "^2.2.3",
     "@noble/hashes": "^1.5.0",
     "cors": "^2.8.5",
+    "dompurify": "^3.4.0",
     "express": "^4.21.2",
     "express-rate-limit": "^8.3.2",
+    "marked": "^14.1.4",
     "pino": "^9.6.0",
     "zod": "^3.24.2"
   },

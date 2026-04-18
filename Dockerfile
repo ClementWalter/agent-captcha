@@ -15,7 +15,6 @@ RUN npm install tsx@^4.19.3
 
 COPY src ./src
 COPY public ./public
-COPY docs ./docs
 COPY tsconfig.json ./
 
 ENV NODE_ENV=production

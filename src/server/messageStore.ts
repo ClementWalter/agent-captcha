@@ -17,7 +17,7 @@ import {
   S3Client,
   PutObjectCommand,
   ListObjectsV2Command,
-  GetObjectCommand
+  GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import pino from "pino";
 import type { ChatMessage } from "./app";
@@ -50,11 +50,11 @@ export class S3MessageStore implements MessageStore {
       region: config.region,
       credentials: {
         accessKeyId: config.accessKey,
-        secretAccessKey: config.secretKey
+        secretAccessKey: config.secretKey,
       },
       // Scaleway uses path-style addressing compatibly with virtual-hosted,
       // but forcePathStyle=true avoids DNS/vhost surprises on cold bootstraps.
-      forcePathStyle: true
+      forcePathStyle: true,
     });
     this.bucket = config.bucket;
     this.prefix = config.keyPrefix ?? "messages/";
@@ -70,8 +70,8 @@ export class S3MessageStore implements MessageStore {
         Bucket: this.bucket,
         Key: key,
         Body: body,
-        ContentType: "application/json"
-      })
+        ContentType: "application/json",
+      }),
     );
     logger.info({ key, messageId: message.id }, "message persisted");
   }
@@ -86,25 +86,31 @@ export class S3MessageStore implements MessageStore {
           Bucket: this.bucket,
           Prefix: this.prefix,
           ContinuationToken: continuationToken,
-          MaxKeys: 1000
-        })
+          MaxKeys: 1000,
+        }),
       );
 
       const keys = (response.Contents ?? [])
         .map((entry) => entry.Key)
         .filter((key): key is string => typeof key === "string");
 
-      // Fan out the GETs — each object is small (a few hundred bytes), so
-      // parallelism is cheap and the total wall time stays low even with
-      // hundreds of messages.
-      const fetched = await Promise.all(keys.map((key) => this.readMessage(key)));
-      for (const message of fetched) {
-        if (message) {
-          messages.push(message);
+      // Batch GETs to avoid unbounded concurrency on large key sets.
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+        const batch = keys.slice(i, i + BATCH_SIZE);
+        const fetched = await Promise.all(
+          batch.map((key) => this.readMessage(key)),
+        );
+        for (const message of fetched) {
+          if (message) {
+            messages.push(message);
+          }
         }
       }
 
-      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+      continuationToken = response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined;
     } while (continuationToken);
 
     return messages;
@@ -118,15 +124,15 @@ export class S3MessageStore implements MessageStore {
       new ListObjectsV2Command({
         Bucket: this.bucket,
         Prefix: this.prefix,
-        MaxKeys: 1
-      })
+        MaxKeys: 1,
+      }),
     );
   }
 
   private async readMessage(key: string): Promise<ChatMessage | null> {
     try {
       const response = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: key })
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
       );
       const bodyText = await response.Body?.transformToString();
       if (!bodyText) {
@@ -151,7 +157,7 @@ export function createMessageStoreFromEnv(): MessageStore {
 
   if (!endpoint || !bucket || !region || !accessKey || !secretKey) {
     throw new Error(
-      "message_store_misconfigured: S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY are all required"
+      "message_store_misconfigured: S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY are all required",
     );
   }
 

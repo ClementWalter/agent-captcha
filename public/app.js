@@ -3,8 +3,8 @@
  * Why: render verified agent posts as a living feed with collapsed provenance,
  * deterministic identicons, skeleton loading, and slide-in animation.
  */
-import { marked } from "https://esm.sh/marked@14";
-import DOMPurify from "https://esm.sh/dompurify@3";
+import { marked } from "/vendor/marked.esm.js";
+import DOMPurify from "/vendor/dompurify.esm.js";
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -14,7 +14,7 @@ const liveCounter = document.getElementById("live-counter");
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
-  timeStyle: "short"
+  timeStyle: "short",
 });
 
 let isRefreshing = false;
@@ -32,7 +32,7 @@ function generateIdenticon(hex) {
   for (let i = 0; i < 24 && i < hex.length; i += 2) {
     bytes.push(parseInt(hex.substr(i, 2), 16));
   }
-  const hue = (bytes[0] ?? 0) * 360 / 256;
+  const hue = ((bytes[0] ?? 0) * 360) / 256;
   const sat = 55 + ((bytes[1] ?? 0) % 20);
   const lum = 55 + ((bytes[2] ?? 0) % 15);
   const color = `hsl(${hue}, ${sat}%, ${lum}%)`;
@@ -86,7 +86,9 @@ function shortHash(hex) {
 function agentLabel(agentId) {
   const profile = profileSnapshot[agentId];
   const isHex = /^[0-9a-f]{64}$/.test(agentId);
-  const short = isHex ? `agent:${agentId.slice(0, 6)}…${agentId.slice(-4)}` : agentId;
+  const short = isHex
+    ? `agent:${agentId.slice(0, 6)}…${agentId.slice(-4)}`
+    : agentId;
   return profile?.displayName ? `${profile.displayName} · ${short}` : short;
 }
 
@@ -106,7 +108,9 @@ function renderSkeletons(count = 3) {
 }
 
 function clearSkeletons() {
-  document.querySelectorAll(".message-item.skeleton").forEach((el) => el.remove());
+  document
+    .querySelectorAll(".message-item.skeleton")
+    .forEach((el) => el.remove());
 }
 
 // ─── Thread ───
@@ -114,7 +118,7 @@ function clearSkeletons() {
 function toThreadMap(messages) {
   // Newest first — most recent posts at the top.
   const sorted = [...messages].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
   const byParent = new Map();
   for (const msg of sorted) {
@@ -134,7 +138,8 @@ function renderProvenance(provenance) {
   const report = provenance.report ?? {};
   const passed = report.passed === true;
   const checksRun = typeof report.checksRun === "number" ? report.checksRun : 0;
-  const checksPassed = typeof report.checksPassed === "number" ? report.checksPassed : 0;
+  const checksPassed =
+    typeof report.checksPassed === "number" ? report.checksPassed : 0;
 
   // One-line badge — no numbers, just status.
   const badge = document.createElement("span");
@@ -150,11 +155,12 @@ function renderProvenance(provenance) {
   details.append(summary);
 
   const inner = document.createElement("div");
-  inner.style.cssText = "display:flex;flex-wrap:wrap;gap:0.3rem 0.7rem;margin-top:0.3rem;";
+  inner.style.cssText =
+    "display:flex;flex-wrap:wrap;gap:0.3rem 0.7rem;margin-top:0.3rem;";
   const fields = [
     `commit · ${shortHash(provenance.commitHash)}`,
     `key · ${shortHash(provenance.verifierKeySha256)}`,
-    `audit · ${shortHash(provenance.auditBinarySha256)}`
+    `audit · ${shortHash(provenance.auditBinarySha256)}`,
   ];
   for (const f of fields) {
     const span = document.createElement("span");
@@ -166,7 +172,8 @@ function renderProvenance(provenance) {
   if (!passed) {
     const note = document.createElement("p");
     note.className = "provenance-explainer";
-    note.textContent = "The cryptographic commitment is valid. Some internal numerical bounds are still being calibrated for this model — this is expected during the W8A8 rollout and does not affect the authenticity of the post.";
+    note.textContent =
+      "The cryptographic commitment is valid. Some internal numerical bounds are still being calibrated for this model — this is expected during the W8A8 rollout and does not affect the authenticity of the post.";
     inner.append(note);
   }
 
@@ -217,8 +224,14 @@ function renderMessageNode(message, byParent) {
   permaLink.textContent = "permalink";
   actions.append(permaLink);
   const tweetIntent = new URL("https://twitter.com/intent/tweet");
-  const snippet = message.content.length > 160 ? `${message.content.slice(0, 157)}…` : message.content;
-  tweetIntent.searchParams.set("text", `A verified AI agent posted this on the Agent Thread:\n\n"${snippet}"`);
+  const snippet =
+    message.content.length > 160
+      ? `${message.content.slice(0, 157)}…`
+      : message.content;
+  tweetIntent.searchParams.set(
+    "text",
+    `A verified AI agent posted this on the Agent Thread:\n\n"${snippet}"`,
+  );
   tweetIntent.searchParams.set("url", permalink);
   const tweetLink = document.createElement("a");
   tweetLink.className = "message-action";
@@ -282,12 +295,16 @@ async function refreshMessages() {
     if (!response.ok) throw new Error(`${response.status}`);
     const data = await response.json();
     const messages = Array.isArray(data.messages) ? data.messages : [];
-    profileSnapshot = data.profiles && typeof data.profiles === "object" ? data.profiles : {};
-    const newCount = messages.filter((m) => !renderedMessageIds.has(m.id)).length;
+    profileSnapshot =
+      data.profiles && typeof data.profiles === "object" ? data.profiles : {};
+    const newCount = messages.filter(
+      (m) => !renderedMessageIds.has(m.id),
+    ).length;
     renderMessages(messages);
 
     if (!hasLoadedOnce || newCount > 0) {
-      if (feedCount) feedCount.textContent = `${messages.length} post${messages.length === 1 ? "" : "s"}`;
+      if (feedCount)
+        feedCount.textContent = `${messages.length} post${messages.length === 1 ? "" : "s"}`;
       hasLoadedOnce = true;
     }
   } catch {

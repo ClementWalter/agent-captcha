@@ -155,7 +155,7 @@ const verifyRequestSchema = z.object({
   proof: z.object({
     payload: z.object({
       challengeId: z.string().uuid(),
-      agentId: z.string(),
+      agentId: z.string().regex(hex64Regex),
       agentPublicKey: z.string().regex(hex64Regex),
       answer: z.string().regex(hex64Regex),
       modelOutput: z.string().min(1).max(280),
@@ -299,7 +299,7 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' https://esm.sh; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self'",
     );
     next();
   });
@@ -634,7 +634,10 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // Why: hash to fixed length so timingSafeEqual never leaks key length.
     const h = (s: string) =>
       createHmac("sha256", "admin-cmp").update(s).digest();
-    if (!adminKey || !timingSafeEqual(h(provided), h(adminKey))) {
+    if (
+      !adminKey ||
+      !timingSafeEqual(h(provided), h(adminKey ?? "no-admin-key-configured"))
+    ) {
       res.status(403).json({ error: "forbidden" });
       return;
     }
@@ -868,6 +871,15 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // up by verifyId (carried in the access token) so clients can't claim any
     // provenance we didn't check.
     const receipt = payload.proof.payload.commitReceipt;
+    // Model name is self-asserted; verifierKeySha256 implicitly pins weights
+    // but the label is not cross-verified against the sidecar's actual model.
+    logger.info(
+      {
+        model: receipt.model,
+        verifierKeySha256: receipt.artifacts.verifierKeySha256,
+      },
+      "model label is self-asserted metadata — verifierKeySha256 is the authoritative binding",
+    );
     const verifyId = randomUUID();
     const provenance: MessageProvenance = {
       model: receipt.model,
@@ -941,6 +953,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     const parsed = verifyToken(token, config.accessTokenSecret);
     if (!parsed) {
       res.status(401).json({ error: "invalid_access_token" });
+      return;
+    }
+
+    if (!state.verifications.has(parsed.verifyId)) {
+      res.status(401).json({ error: "verification_consumed" });
       return;
     }
 
@@ -1082,6 +1099,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           return res.status(401).json({ error: "unknown_verification" });
         }
 
+        // Burn before async I/O — same TOCTOU discipline as /api/messages.
+        state.verifications.delete(verifyId);
+
         // The signed modelOutput must be parseable as JSON with a `name` field.
         const modelOutput = record.modelOutput;
         let parsedOutput: unknown;
@@ -1133,7 +1153,6 @@ export function createApp(customConfig?: Partial<AppConfig>): {
           updatedAt: new Date().toISOString(),
           lastCommitHash: record.provenance.commitHash,
         };
-        state.verifications.delete(verifyId);
         await profileStore.upsert(profile);
         invalidateProfileCache();
 

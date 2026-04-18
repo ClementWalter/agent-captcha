@@ -7,7 +7,12 @@
  * so a display name change IS a real verified LLM inference, not a free
  * rename. One object per agentId, overwrite-in-place.
  */
-import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+} from "@aws-sdk/client-s3";
 import pino from "pino";
 
 const logger = pino({ name: "agent-captcha-profile-store" });
@@ -44,8 +49,11 @@ export class S3ProfileStore implements ProfileStore {
     this.client = new S3Client({
       endpoint: config.endpoint,
       region: config.region,
-      credentials: { accessKeyId: config.accessKey, secretAccessKey: config.secretKey },
-      forcePathStyle: true
+      credentials: {
+        accessKeyId: config.accessKey,
+        secretAccessKey: config.secretKey,
+      },
+      forcePathStyle: true,
     });
     this.bucket = config.bucket;
     this.prefix = config.keyPrefix ?? "profiles/";
@@ -58,19 +66,27 @@ export class S3ProfileStore implements ProfileStore {
         Bucket: this.bucket,
         Key: key,
         Body: JSON.stringify(profile),
-        ContentType: "application/json"
-      })
+        ContentType: "application/json",
+      }),
     );
-    logger.info({ key, agentId: profile.agentId, displayName: profile.displayName }, "profile upserted");
+    logger.info(
+      { key, agentId: profile.agentId, displayName: profile.displayName },
+      "profile upserted",
+    );
   }
 
-  public async getMany(agentIds: string[]): Promise<Record<string, AgentProfile>> {
+  public async getMany(
+    agentIds: string[],
+  ): Promise<Record<string, AgentProfile>> {
     const unique = Array.from(new Set(agentIds));
     const entries = await Promise.all(
       unique.map(async (agentId) => {
         try {
           const response = await this.client.send(
-            new GetObjectCommand({ Bucket: this.bucket, Key: `${this.prefix}${agentId}.json` })
+            new GetObjectCommand({
+              Bucket: this.bucket,
+              Key: `${this.prefix}${agentId}.json`,
+            }),
           );
           const body = await response.Body?.transformToString();
           if (!body) {
@@ -85,7 +101,7 @@ export class S3ProfileStore implements ProfileStore {
           }
           return null;
         }
-      })
+      }),
     );
     const result: Record<string, AgentProfile> = {};
     for (const profile of entries) {
@@ -105,22 +121,28 @@ export class S3ProfileStore implements ProfileStore {
           Bucket: this.bucket,
           Prefix: this.prefix,
           ContinuationToken: token,
-          MaxKeys: 1000
-        })
+          MaxKeys: 1000,
+        }),
       );
       const keys = (response.Contents ?? [])
         .map((e) => e.Key)
         .filter((k): k is string => typeof k === "string");
-      const fetched = await Promise.all(
-        keys.map(async (key) => {
-          const resp = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
-          const body = await resp.Body?.transformToString();
-          return body ? (JSON.parse(body) as AgentProfile) : null;
-        })
-      );
-      for (const profile of fetched) {
-        if (profile) {
-          profiles[profile.agentId] = profile;
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+        const batch = keys.slice(i, i + BATCH_SIZE);
+        const fetched = await Promise.all(
+          batch.map(async (key) => {
+            const resp = await this.client.send(
+              new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+            );
+            const body = await resp.Body?.transformToString();
+            return body ? (JSON.parse(body) as AgentProfile) : null;
+          }),
+        );
+        for (const profile of fetched) {
+          if (profile) {
+            profiles[profile.agentId] = profile;
+          }
         }
       }
       token = response.IsTruncated ? response.NextContinuationToken : undefined;
@@ -130,7 +152,11 @@ export class S3ProfileStore implements ProfileStore {
 
   public async healthCheck(): Promise<void> {
     await this.client.send(
-      new ListObjectsV2Command({ Bucket: this.bucket, Prefix: this.prefix, MaxKeys: 1 })
+      new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: this.prefix,
+        MaxKeys: 1,
+      }),
     );
   }
 }
@@ -143,7 +169,7 @@ export function createProfileStoreFromEnv(): ProfileStore {
   const secretKey = process.env.S3_SECRET_KEY;
   if (!endpoint || !bucket || !region || !accessKey || !secretKey) {
     throw new Error(
-      "profile_store_misconfigured: S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY are all required"
+      "profile_store_misconfigured: S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY are all required",
     );
   }
   return new S3ProfileStore({ endpoint, bucket, region, accessKey, secretKey });
