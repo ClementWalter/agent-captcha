@@ -950,7 +950,11 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     });
   }
 
-  const verifyBodyParser = express.json({ limit: "1mb" });
+  // Audit binaries are base64-encoded WASM/Rust verifier artefacts and
+  // routinely run to several MB; 1mb here rejects every legitimate
+  // verify request with 413. Keep the tight 256kb global cap and give
+  // this one route enough headroom for a real commitllm audit.
+  const verifyBodyParser = express.json({ limit: "20mb" });
   app.post(
     VERIFY_V2_PATH,
     verifyLimiter,
