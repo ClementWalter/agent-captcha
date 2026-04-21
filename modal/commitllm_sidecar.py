@@ -74,17 +74,20 @@ image = (
         }
     )
     .pip_install(*VERIFICATION, *EXTRA)
-    # Clone CommitLLM upstream and build both the Python sidecar and the Rust
-    # verifier crate. Pinned to main for now; swap to a tag once upstream cuts
-    # one.
+    # Build from a fork pinned at the commit that adds
+    # `verilm_rs.deserialize_v4_audit`. Upstream PR:
+    # https://github.com/lambdaclass/CommitLLM/pull/5. Flip back to
+    # `lambdaclass/CommitLLM` main once the PR merges; until then this
+    # fork is the minimal delta and is otherwise at parity with main.
     .run_commands(
-        "git clone --depth 1 https://github.com/lambdaclass/CommitLLM.git /opt/commitllm",
+        "git clone https://github.com/ClementWalter/CommitLLM.git /opt/commitllm",
+        "cd /opt/commitllm && git checkout f76c679a0e69739c7827241767e0059409c4fba6",
         "pip install -e /opt/commitllm/sidecar",
         # Install .pth so verilm capture activates in vLLM worker subprocesses.
         'python3 -c "import site, os; open(os.path.join(site.getsitepackages()[0], \\"verilm_capture.pth\\"), \\"w\\").write(\\"import verilm._startup\\n\\")"',
         "cd /opt/commitllm/crates/verilm-py && maturin build --release",
         "bash -c 'pip install /opt/commitllm/target/wheels/verilm_rs-*.whl'",
-        "python -c 'import verilm_rs; print(\"verilm_rs OK\")'",
+        'python -c \'import verilm_rs; assert hasattr(verilm_rs, "deserialize_v4_audit"), "deserialize_v4_audit missing from build"; print("verilm_rs OK")\'',
     )
 )
 
@@ -306,54 +309,46 @@ def fastapi_app():
                 },
                 status_code=400,
             )
-        if expected_output_hash:
-            if not hasattr(verilm_rs, "deserialize_v4_audit"):
-                logger.error(
-                    "deserialize_v4_audit unavailable — refusing to accept receipt"
-                )
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "output_hash_binding_unverifiable",
-                        "detail": "verilm_rs build does not expose deserialize_v4_audit",
-                    },
-                    status_code=500,
-                )
-            try:
-                audit_meta = verilm_rs.deserialize_v4_audit(audit_binary)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("deserialize_v4_audit raised")
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "output_hash_binding_unverifiable",
-                        "detail": f"deserialize_v4_audit failed: {exc}",
-                    },
-                    status_code=400,
-                )
-            actual_output_hash = (
-                audit_meta.get("output_hash", "")
-                if isinstance(audit_meta, dict)
-                else ""
+        # Extract the committed output_text from the binary and hash it
+        # ourselves. `verilm_rs.deserialize_v4_audit` (from the pinned
+        # fork, upstream PR lambdaclass/CommitLLM#5) returns a dict of
+        # the publicly-committed fields. The Node server computes
+        # `expected_output_hash = sha256hex(modelOutput)` and sends it
+        # here; we match by hashing the binary's own output_text with
+        # the same function and comparing. No tolerance for a missing
+        # output_text: if the binary doesn't carry it, we cannot bind.
+        try:
+            audit_meta = verilm_rs.deserialize_v4_audit(audit_binary)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("deserialize_v4_audit raised")
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "output_hash_binding_unverifiable",
+                    "detail": f"deserialize_v4_audit failed: {exc}",
+                },
+                status_code=400,
             )
-            if not actual_output_hash:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "output_hash_binding_unverifiable",
-                        "detail": "audit binary did not expose an output_hash commitment",
-                    },
-                    status_code=400,
-                )
-            if actual_output_hash != expected_output_hash:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "output_hash_binding_mismatch",
-                        "detail": "audit binary output hash does not match expected",
-                    },
-                    status_code=400,
-                )
+        output_text = audit_meta.get("output_text")
+        if not isinstance(output_text, str) or not output_text:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "output_hash_binding_unverifiable",
+                    "detail": "audit binary did not carry a committed output_text",
+                },
+                status_code=400,
+            )
+        actual_output_hash = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+        if actual_output_hash != expected_output_hash:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "output_hash_binding_mismatch",
+                    "detail": "audit binary output hash does not match expected",
+                },
+                status_code=400,
+            )
 
         return {
             "ok": True,
