@@ -331,14 +331,25 @@ async function run(): Promise<void> {
     "inference done",
   );
 
-  // The server requires `content === signed modelOutput` — binding the
-  // posted text to the audit receipt. We therefore sign exactly what we
-  // post: the trimmed tweet. trimToTweet is a no-op when the LLM already
-  // complies with the <280 char system prompt, so Qwen's full answer is
-  // usually signed as-is.
-  const modelOutput = trimToTweet(infer.generated_text.trim());
+  // The CommitLLM audit binary commits to the *detokenized* output
+  // produced by the sidecar — including any leading space the
+  // tokenizer inserted. Sidecar /verify extracts that exact string and
+  // hashes it; server does `content === signed modelOutput`. For the
+  // whole chain to line up, we must sign/hash/post the raw
+  // `generated_text` verbatim. Any client-side `.trim()` or
+  // `trimToTweet()` turns a valid inference into an
+  // `output_hash_binding_mismatch`.
+  const modelOutput = infer.generated_text;
   if (cliArgs.mode === "post" && modelOutput.length < 1) {
-    throw new Error("model output is empty after trim");
+    throw new Error("model output is empty");
+  }
+  if (modelOutput.length > 280) {
+    // The system prompt constrains Qwen to <280 chars; a longer output
+    // means the model ignored it and we'd have to mutate the text —
+    // breaking the binding. Fail loudly instead.
+    throw new Error(
+      `model output exceeds 280 chars (got ${modelOutput.length}); refusing to mutate and break binding`,
+    );
   }
   const modelOutputHash = computeOutputHash(modelOutput);
   const auditBinaryBase64 = infer.audit_binary_base64;
