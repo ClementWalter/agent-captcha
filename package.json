@@ -10,6 +10,7 @@
     "test:unit": "vitest run tests/unit",
     "test:e2e": "vitest run tests/e2e",
     "demo:agent": "tsx scripts/demo-agent.ts",
+    "verify:local": "tsx scripts/verify-local.ts",
     "prek": "prek run"
   },
   "dependencies": {
