@@ -882,9 +882,21 @@ export function createApp(customConfig?: Partial<AppConfig>): {
       if (!config.disableAuditBinaryTracking) {
         state.usedAuditBinaryHashes.delete(abHash);
       }
-      res
-        .status(401)
-        .json({ error: verification.reason ?? "verification_failed" });
+      // Why: for the `commitllm_verify_v4_failed` path the response
+      // used to be just { error } — opaque enough that debugging a
+      // legitimate flaky verify required reading Scaleway logs. The
+      // Rust verifier already returns a structured failure list
+      // (upstream FailureCode names); exposing it in the response
+      // makes the client error actionable without weakening the
+      // security surface: the codes/messages describe what check
+      // failed, not internal state.
+      const body: { error: string; failures?: string[] } = {
+        error: verification.reason ?? "verification_failed",
+      };
+      if (verification.failures && verification.failures.length > 0) {
+        body.failures = verification.failures;
+      }
+      res.status(401).json(body);
       return;
     }
 

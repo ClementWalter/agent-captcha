@@ -88,6 +88,7 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     valid: boolean;
     reason?: string;
     report?: CommitLLMVerifyReport;
+    failures?: string[];
   }> {
     // Shape checks: keep these local so we never round-trip to Modal for
     // obviously-wrong receipts.
@@ -211,7 +212,39 @@ export class CommitLLMModalReceiptVerifier implements CommitReceiptVerifier {
     }
 
     if (!report.passed) {
-      return { valid: false, reason: "commitllm_verify_v4_failed" };
+      // Surface the specific check(s) that failed. Debugging
+      // "commitllm_verify_v4_failed" without the failure list is
+      // guesswork — there are dozens of reasons the Rust verifier
+      // can reject a binary (Freivalds, Merkle, IO chain, attention
+      // replay, etc). Names match upstream FailureCode serialization.
+      const rawFailures = Array.isArray(report.failures) ? report.failures : [];
+      const failureDetail = rawFailures
+        .map((f: unknown) => {
+          if (typeof f === "string") return f;
+          if (f && typeof f === "object") {
+            const obj = f as { code?: unknown; message?: unknown };
+            const code = typeof obj.code === "string" ? obj.code : undefined;
+            const message =
+              typeof obj.message === "string" ? obj.message : undefined;
+            return code && message ? `${code}: ${message}` : (code ?? message);
+          }
+          return undefined;
+        })
+        .filter((entry): entry is string => typeof entry === "string");
+      logger.warn(
+        {
+          challengeId: expected.challengeId,
+          checksRun,
+          checksPassed,
+          failures: failureDetail,
+        },
+        "CommitLLM verify_v4_binary returned passed=false",
+      );
+      return {
+        valid: false,
+        reason: "commitllm_verify_v4_failed",
+        failures: failureDetail,
+      };
     }
 
     // Why: cross-checks are mandatory — if the sidecar omits them, a code

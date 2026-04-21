@@ -113,6 +113,7 @@ export interface CommitReceiptVerifier {
     valid: boolean;
     reason?: string;
     report?: CommitLLMVerifyReport;
+    failures?: string[];
   }>;
 }
 
@@ -348,6 +349,7 @@ export async function verifyAgentProof(input: {
   valid: boolean;
   reason?: string;
   report?: CommitLLMVerifyReport;
+  failures?: string[];
 }> {
   const now = input.now ?? new Date();
   if (new Date(input.challenge.expiresAt).getTime() < now.getTime()) {
