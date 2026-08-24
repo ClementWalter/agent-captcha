@@ -60,10 +60,6 @@ function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
-function trimToTweet(s: string, max = 280): string {
-  return s.length <= max ? s : s.slice(0, max);
-}
-
 type InferResponse = {
   generated_text: string;
   audit_binary_base64: string;
@@ -97,7 +93,9 @@ async function main() {
   );
   const inferMs = Date.now() - started;
 
-  const modelOutput = trimToTweet(infer.generated_text.trim());
+  // Why: the audit binary commits to generated_text verbatim — same
+  // contract as scripts/demo-agent.ts. trim()/slice would hash-mismatch.
+  const modelOutput = infer.generated_text;
   const expectedOutputHash = sha256Hex(modelOutput);
   console.log(
     `      inference ok (${inferMs}ms) generated=${JSON.stringify(modelOutput.slice(0, 80))}`,

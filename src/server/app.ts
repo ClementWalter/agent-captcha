@@ -702,14 +702,21 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     // exhaust another agent's challenge slots (CAPTCHA-CHALLENGE-DOS-001).
     const requestIp = req.ip ?? "unknown";
     let agentChallengeCount = 0;
+    let ipChallengeCount = 0;
     for (const entry of state.challenges.values()) {
-      if (
-        entry.expectedAgentId === agentId &&
-        !entry.consumed &&
-        entry.requestIp === requestIp
-      ) {
+      if (entry.consumed || entry.requestIp !== requestIp) {
+        continue;
+      }
+      ipChallengeCount++;
+      if (entry.expectedAgentId === agentId) {
         agentChallengeCount++;
       }
+    }
+    // Why: agentId is an unauthenticated public key, so the per-(IP, agentId)
+    // cap of 5 is bypassed by rotating keys. Cap pending challenges per IP
+    // across all agentIds so one requester cannot fill the global 10k map.
+    if (ipChallengeCount >= 20) {
+      return res.status(429).json({ error: "too_many_pending_challenges" });
     }
     if (agentChallengeCount >= 5) {
       return res.status(429).json({ error: "too_many_pending_challenges" });
@@ -843,9 +850,9 @@ export function createApp(customConfig?: Partial<AppConfig>): {
     }
 
     // Why: check reuse BEFORE the expensive GPU sidecar call to prevent cost
-    // amplification. Use a "pending" sentinel to block concurrent requests
-    // while allowing rollback on failure (CAPTCHA-AUDIT-001).
-    const PENDING_SENTINEL = -1;
+    // amplification. In-flight hashes use +Infinity so the expiry sweep
+    // (expiresAt < now) cannot drop the sentinel mid-verify (CAPTCHA-AUDIT-001).
+    const PENDING_SENTINEL = Number.POSITIVE_INFINITY;
     if (
       !config.disableAuditBinaryTracking &&
       state.usedAuditBinaryHashes.has(abHash)
@@ -1271,8 +1278,13 @@ export function createApp(customConfig?: Partial<AppConfig>): {
   );
 
   app.get("*", (req, res) => {
-    const sensitive =
-      /^\/(\.env|\.git|\.aws|\.ssh|\.docker|\.npmrc|\.htpasswd|robots\.txt|sitemap\.xml|wp-admin|wp-login)/i;
+    // Why: unknown /api paths must 404 as JSON so scanners can tell missing
+    // endpoints from the SPA. Any `/.` path is a dotfile/secrets probe.
+    if (req.path.startsWith("/api") || req.path.startsWith("/.")) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    const sensitive = /^\/(robots\.txt|sitemap\.xml|wp-admin|wp-login)/i;
     if (sensitive.test(req.path)) {
       res.status(404).json({ error: "not_found" });
       return;
